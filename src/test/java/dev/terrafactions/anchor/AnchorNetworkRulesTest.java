@@ -49,6 +49,29 @@ class AnchorNetworkRulesTest {
                 anchors, Set.of("capital"), Set.of("capital", "middle", "colony")));
     }
 
+    @Test
+    void anchorSupplyNetworkCrossesAWorldSeam() {
+        UUID faction = UUID.randomUUID();
+        AnchorMapSnapshot capital = anchor("capital", faction, 0, 0, 1);
+        AnchorMapSnapshot oppositeEdge = anchor("edge", faction, 9, 0, 1);
+
+        assertEquals(AnchorNetworkRules.LinkType.MUTUAL,
+                AnchorNetworkRules.linkType(capital, oppositeEdge,
+                        AnchorNetworkRulesTest::wrappedDistanceSquared));
+        assertEquals(Set.of("capital", "edge"), AnchorNetworkRules.connectedToCapital(
+                List.of(capital, oppositeEdge), Set.of("capital"), Set.of("capital", "edge"),
+                AnchorNetworkRulesTest::wrappedDistanceSquared));
+    }
+
+    private static long wrappedDistanceSquared(AnchorMapSnapshot first, AnchorMapSnapshot second) {
+        int firstX = Math.floorDiv(first.x(), 16);
+        int secondX = Math.floorDiv(second.x(), 16);
+        long directX = Math.abs((long) Math.floorMod(firstX, 10) - Math.floorMod(secondX, 10));
+        long dx = Math.min(directX, 10L - directX);
+        long dz = (long) Math.floorDiv(first.z(), 16) - Math.floorDiv(second.z(), 16);
+        return dx * dx + dz * dz;
+    }
+
     private static AnchorMapSnapshot anchor(String id, UUID faction, int chunkX, int chunkZ, int radius) {
         return new AnchorMapSnapshot(id, faction, "minecraft:overworld", chunkX * 16, 64, chunkZ * 16,
                 AnchorTier.BASIC, 0, 0, 0, radius, 0, AnchorPowerState.FULL,

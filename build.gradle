@@ -134,6 +134,12 @@ dependencies {
     testImplementation "info.journeymap:journeymap-api-neoforge:${project.journeymap_api_version}"
 
     compileOnly "info.journeymap:journeymap-api-neoforge:${project.journeymap_api_version}"
+    // Create is optional at runtime. Its classes are only referenced by a mixin
+    // configuration which NeoForge loads when Create is actually installed.
+    compileOnly "maven.modrinth:create:${project.create_version}"
+    // Toroidal World is optional. The integration is isolated behind a mod-presence
+    // check so normal TerraFactions installations do not need this dependency.
+    compileOnly "maven.modrinth:toroidal-world:${project.toroidal_world_version}"
     // The Git project currently has no explicit rootProject.name, so Gradle derives
     // its module name from the repository directory.
     implementation('com.digitscodecompendium.terralib:minecraft_mod.terraLib') {
@@ -146,6 +152,8 @@ dependencies {
     localRuntime "maven.modrinth:journeymap:${project.journeymap_version}"
     localRuntime "info.journeymap:journeymap-api-neoforge:${project.journeymap_api_version}"
     localRuntime "mysticdrew:common-networking-neoforge:${project.common_networking_version}"
+    localRuntime "maven.modrinth:create:${project.create_version}"
+    localRuntime "maven.modrinth:toroidal-world:${project.toroidal_world_version}"
 
 }
 

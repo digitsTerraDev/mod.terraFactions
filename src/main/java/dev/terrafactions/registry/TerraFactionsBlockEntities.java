@@ -2,6 +2,7 @@ package dev.terrafactions.registry;
 
 import dev.terrafactions.TerraFactions;
 import dev.terrafactions.anchor.FactionAnchorBlockEntity;
+import dev.terrafactions.war.FactionWarCampBlockEntity;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.neoforged.neoforge.registries.DeferredHolder;
@@ -16,6 +17,10 @@ public final class TerraFactionsBlockEntities {
                     FactionAnchorBlockEntity::new, TerraFactionsBlocks.FACTION_ANCHOR.get(),
                     TerraFactionsBlocks.ADVANCED_FACTION_ANCHOR.get(),
                     TerraFactionsBlocks.MASTER_FACTION_ANCHOR.get()).build(null));
+
+    public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<FactionWarCampBlockEntity>> WAR_CAMP =
+            BLOCK_ENTITIES.register("war_camp", () -> BlockEntityType.Builder.of(
+                    FactionWarCampBlockEntity::new, TerraFactionsBlocks.WAR_CAMP.get()).build(null));
 
     private TerraFactionsBlockEntities() {
     }

@@ -6,6 +6,7 @@ import com.digitscodecompendium.terralib.client.gui.TerraUiTheme;
 import dev.terrafactions.factions.FactionRank;
 import dev.terrafactions.journeymap.TerraFactionsClientConfig;
 import dev.terrafactions.network.TerritoryRadarPayload;
+import dev.terrafactions.war.WarGoalType;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -23,6 +24,7 @@ public final class TerritoryRadarHud {
     private static final int VULNERABLE_YELLOW = 0xFFFFFF55;
     private static final int ISOLATED_AMBER = 0xFFFFAA00;
     private static TerritoryRadarPayload state = TerritoryRadarPayload.hidden();
+    private static boolean hudVisible = true;
 
     private TerritoryRadarHud() {
     }
@@ -35,25 +37,48 @@ public final class TerritoryRadarHud {
         return state.factionRank();
     }
 
+    static boolean hudVisible() {
+        return hudVisible;
+    }
+
+    static boolean toggleHudVisibility() {
+        hudVisible = !hudVisible;
+        return hudVisible;
+    }
+
     /** Renders the independently configured territory radar. */
     public static void render(GuiGraphics graphics, DeltaTracker deltaTracker) {
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.options.hideGui || minecraft.player == null
-                || !TerraFactionsClientConfig.RADAR_HUD.enabled() || !state.radarVisible()) {
+        if (!hudVisible || minecraft.options.hideGui || minecraft.player == null
+                || !TerraFactionsClientConfig.RADAR_HUD.enabled()
+                || (!state.radarVisible() && !state.warVisible())) {
             return;
         }
 
-        String label = radarLabel();
+        boolean showRadar = state.radarVisible();
+        String label = showRadar ? radarLabel() : "";
         int contentWidth = Math.max(MIN_CONTENT_WIDTH, minecraft.font.width(label));
-        boolean showFactionInfo = TerraFactionsClientConfig.FACTION_INFO_ENABLED.get()
+        boolean showFactionInfo = showRadar && TerraFactionsClientConfig.FACTION_INFO_ENABLED.get()
                 && state.factionInfoVisible();
         String power = "P: " + state.power() + "/" + state.maximumPower();
         if (showFactionInfo) {
             contentWidth = Math.max(contentWidth,
                     minecraft.font.width(power) + STATUS_GAP + statusWidth(minecraft));
         }
+        String warTitle = state.warVisible() ? "WAR: " + state.warOpponent() + " - "
+                + state.warState().name() : "";
+        String ownGoal = state.warVisible() ? "Goal: " + warGoalLabel() : "";
+        String enemyGoal = state.warVisible() ? "Enemy: "
+                + (state.enemyWarGoal() == null ? "Not selected" : pretty(state.enemyWarGoal().name())) : "";
+        if (state.warVisible()) {
+            contentWidth = Math.max(contentWidth, minecraft.font.width(warTitle));
+            contentWidth = Math.max(contentWidth, minecraft.font.width(ownGoal));
+            contentWidth = Math.max(contentWidth, minecraft.font.width(enemyGoal));
+        }
         int width = contentWidth + PADDING * 2 + ACCENT_WIDTH + 2;
-        int contentHeight = LINE_HEIGHT + (showFactionInfo ? ROW_GAP + LINE_HEIGHT : 0);
+        int radarHeight = showRadar ? LINE_HEIGHT + (showFactionInfo ? ROW_GAP + LINE_HEIGHT : 0) : 0;
+        int warHeight = state.warVisible() ? LINE_HEIGHT * 3 + ROW_GAP : 0;
+        int contentHeight = radarHeight + (radarHeight > 0 && warHeight > 0 ? ROW_GAP : 0) + warHeight;
         int height = contentHeight + PADDING * 2;
         HudPanelPlacement placement = TerraFactionsClientConfig.RADAR_HUD.placement();
         double screenX = graphics.guiWidth() * placement.horizontalPercent() / 100.0D;
@@ -69,21 +94,57 @@ public final class TerritoryRadarHud {
                     TerraFactionsClientConfig.RADAR_HUD.opacity());
             int lineY = PADDING;
             int textX = PADDING + ACCENT_WIDTH + 2;
-            int accent = state.vulnerable() ? vulnerabilityColor(minecraft)
-                    : state.isolated() ? ISOLATED_AMBER : 0xFF000000 | state.relationColor();
-            graphics.fill(PADDING, lineY, PADDING + ACCENT_WIDTH, lineY + LINE_HEIGHT - 1, accent);
-            graphics.drawString(minecraft.font, label, textX, lineY,
-                    0xFF000000 | state.relationColor(), false);
-            if (showFactionInfo) {
-                int separatorY = lineY + LINE_HEIGHT + 2;
-                graphics.fill(textX, separatorY, width - PADDING, separatorY + 1,
-                        TerraUiTheme.VANILLA.surfaceHighlight());
-                renderFactionInfo(graphics, minecraft, power, textX,
-                        lineY + LINE_HEIGHT + ROW_GAP);
+            if (showRadar) {
+                int accent = state.vulnerable() ? vulnerabilityColor(minecraft)
+                        : state.isolated() ? ISOLATED_AMBER : 0xFF000000 | state.relationColor();
+                graphics.fill(PADDING, lineY, PADDING + ACCENT_WIDTH, lineY + LINE_HEIGHT - 1, accent);
+                graphics.drawString(minecraft.font, label, textX, lineY,
+                        0xFF000000 | state.relationColor(), false);
+                lineY += LINE_HEIGHT;
+                if (showFactionInfo) {
+                    int separatorY = lineY + 2;
+                    graphics.fill(textX, separatorY, width - PADDING, separatorY + 1,
+                            TerraUiTheme.VANILLA.surfaceHighlight());
+                    lineY += ROW_GAP;
+                    renderFactionInfo(graphics, minecraft, power, textX, lineY);
+                    lineY += LINE_HEIGHT;
+                }
+            }
+            if (state.warVisible()) {
+                if (lineY > PADDING) {
+                    graphics.fill(textX, lineY + 2, width - PADDING, lineY + 3,
+                            TerraUiTheme.VANILLA.surfaceHighlight());
+                    lineY += ROW_GAP;
+                }
+                graphics.drawString(minecraft.font, warTitle, textX, lineY, VULNERABLE_RED, false);
+                graphics.drawString(minecraft.font, ownGoal, textX, lineY + LINE_HEIGHT,
+                        state.ownWarFailed() ? VULNERABLE_RED
+                                : state.ownWarCompleted() ? 0xFF55FF55 : TerraUiTheme.VANILLA.text(), false);
+                graphics.drawString(minecraft.font, enemyGoal, textX, lineY + LINE_HEIGHT * 2,
+                        TerraUiTheme.VANILLA.mutedText(), false);
             }
         } finally {
             graphics.pose().popPose();
         }
+    }
+
+    private static String warGoalLabel() {
+        WarGoalType goal = state.ownWarGoal();
+        if (goal == null) return "Not selected";
+        String label = pretty(goal.name());
+        if (goal == WarGoalType.CONQUEST || goal == WarGoalType.PLUNDER || goal == WarGoalType.PUNITIVE) {
+            label += " " + state.ownWarProgress() + "/" + state.ownWarRequired();
+        }
+        if (goal.requiresWarCamp()) {
+            label += " | Camp: " + (state.warCampState() == null
+                    ? "Not placed" : pretty(state.warCampState().name()));
+        }
+        return label;
+    }
+
+    private static String pretty(String name) {
+        String lower = name.toLowerCase(java.util.Locale.ROOT).replace('_', ' ');
+        return Character.toUpperCase(lower.charAt(0)) + lower.substring(1);
     }
 
     private static String radarLabel() {

@@ -10,7 +10,7 @@ public final class TerraFactionsNetwork {
     }
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        var registrar = event.registrar("13");
+        var registrar = event.registrar("15");
         registrar.playToClient(TerritoryRadarPayload.TYPE, TerritoryRadarPayload.STREAM_CODEC,
                 (payload, context) -> TerritoryRadarHud.accept(payload));
         registrar.playToClient(FactionUiPayload.TYPE, FactionUiPayload.STREAM_CODEC,
@@ -40,6 +40,12 @@ public final class TerraFactionsNetwork {
                 (payload, context) -> context.enqueueWork(() -> {
                     if (context.player() instanceof ServerPlayer player) {
                         TerraFactions.territories().requestAnchorState(player, payload);
+                    }
+                }));
+        registrar.playToServer(HudVisibilityPayload.TYPE, HudVisibilityPayload.STREAM_CODEC,
+                (payload, context) -> context.enqueueWork(() -> {
+                    if (context.player() instanceof ServerPlayer player) {
+                        TerraFactions.territories().setHudVisible(player, payload.visible());
                     }
                 }));
     }

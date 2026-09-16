@@ -2,6 +2,9 @@ package dev.terrafactions.factions;
 
 import dev.terrafactions.anchor.AnchorMapSnapshot;
 import dev.terrafactions.anchor.AnchorNetworkRules;
+import dev.terrafactions.anchor.AnchorPowerState;
+import dev.terrafactions.anchor.AnchorConnectionState;
+import dev.terrafactions.anchor.AnchorVulnerabilityState;
 import dev.terrafactions.factions.FactionSnapshot.CapitalSnapshot;
 import dev.terrafactions.factions.FactionSnapshot.ClaimSnapshot;
 import dev.terrafactions.factions.NativeFactionData.FactionRecord;
@@ -11,7 +14,10 @@ import dev.terrafactions.factions.NativeFactionData.PlayerSettings;
 import dev.terrafactions.territory.TerraFactionsConfig;
 import dev.terrafactions.territory.TerritoryClaim;
 import dev.terrafactions.territory.TerritoryKey;
+import dev.terrafactions.territory.TerritoryRules;
 import dev.terrafactions.territory.TerritoryType;
+import dev.terrafactions.territory.ProtectionAction;
+import dev.terrafactions.territory.ProtectionPolicy;
 import net.minecraft.server.MinecraftServer;
 
 import java.util.ArrayList;
@@ -24,12 +30,17 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.ToIntFunction;
+import java.util.function.ToDoubleFunction;
+import java.util.function.UnaryOperator;
 
 import dev.terrafactions.factions.LegacyFactionImporter.LegacyImport;
 
 /** Native NeoForge faction authority. No Fabric or Connector types cross this boundary. */
 public final class NativeFactionService {
     private NativeFactionData data;
+    private ToIntFunction<UUID> temporaryPowerProvider = ignored -> 0;
+    private ToDoubleFunction<UUID> powerSuppressionProvider = ignored -> 0.0D;
 
     public void initialize(MinecraftServer server) {
         data = server.overworld().getDataStorage().computeIfAbsent(
@@ -38,6 +49,8 @@ public final class NativeFactionService {
 
     public void stop() {
         data = null;
+        temporaryPowerProvider = ignored -> 0;
+        powerSuppressionProvider = ignored -> 0.0D;
     }
 
     public boolean isReady() {
@@ -111,13 +124,19 @@ public final class NativeFactionService {
     public FactionPower power(UUID factionId) {
         FactionRecord faction = requireData().factions.get(factionId);
         if (faction == null) return null;
-        int maximum = maximumPower(factionId);
+        int baseMaximum = baseMaximumPower(factionId);
+        int temporaryPower = temporaryPower(factionId);
+        double suppressionPercent = powerSuppression(factionId);
+        int suppressedPower = (int) Math.min(Integer.MAX_VALUE,
+                Math.ceil(baseMaximum * suppressionPercent));
+        int maximum = Math.max(0, saturatedPositiveAdd(baseMaximum, temporaryPower) - suppressedPower);
         int claimUsage = claimUsage(factionId);
         int deathLoss = (int) Math.min(Integer.MAX_VALUE,
-                Math.max(0L, (long) maximum - faction.power));
-        long available = (long) faction.power - claimUsage;
+                Math.max(0L, (long) baseMaximum - faction.power));
+        long available = Math.min((long) maximum, (long) faction.power + temporaryPower) - claimUsage;
         return new FactionPower((int) Math.max(Integer.MIN_VALUE, available), maximum,
-                claimUsage, deathLoss, faction.specialPower, faction.deathLosses);
+                claimUsage, deathLoss, faction.specialPower, temporaryPower, suppressedPower,
+                suppressionPercent, faction.deathLosses);
     }
 
     public int claimUsage(UUID factionId) {
@@ -134,6 +153,21 @@ public final class NativeFactionService {
     }
 
     public int maximumPower(UUID factionId) {
+        int baseMaximum = baseMaximumPower(factionId);
+        int suppressedPower = (int) Math.min(Integer.MAX_VALUE,
+                Math.ceil(baseMaximum * powerSuppression(factionId)));
+        return Math.max(0, saturatedPositiveAdd(baseMaximum, temporaryPower(factionId)) - suppressedPower);
+    }
+
+    public void setTemporaryPowerProvider(ToIntFunction<UUID> provider) {
+        temporaryPowerProvider = provider == null ? ignored -> 0 : provider;
+    }
+
+    public void setPowerSuppressionProvider(ToDoubleFunction<UUID> provider) {
+        powerSuppressionProvider = provider == null ? ignored -> 0.0D : provider;
+    }
+
+    private int baseMaximumPower(UUID factionId) {
         long members = requireData().members.values().stream()
                 .filter(member -> member.factionId.equals(factionId)).count();
         long maximum = TerraFactionsConfig.BASE_POWER.get()
@@ -144,7 +178,7 @@ public final class NativeFactionService {
 
     public void adjustSpecialPower(UUID factionId, int amount) {
         FactionRecord faction = requireFaction(factionId);
-        int previousMaximum = maximumPower(factionId);
+        int previousMaximum = baseMaximumPower(factionId);
         long adjusted = (long) faction.specialPower + amount;
         faction.specialPower = (int) Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, adjusted));
         preservePowerDeficit(factionId, previousMaximum);
@@ -168,17 +202,26 @@ public final class NativeFactionService {
                 .findFirst().orElse(null);
     }
 
-    public UUID createFaction(UUID ownerId, String name) {
+    public UUID createFaction(UUID ownerId, String name, long createdAt) {
         NativeFactionData state = requireData();
         if (state.members.containsKey(ownerId)) throw new IllegalStateException("Player is already in a faction");
         if (factionByName(name) != null) throw new IllegalArgumentException("A faction with that name already exists");
         UUID id = UUID.randomUUID();
         FactionRecord faction = new FactionRecord(id, name);
+        faction.createdAt = Math.max(0L, createdAt);
         state.factions.put(id, faction);
         state.members.put(ownerId, new MemberRecord(id, FactionRank.OWNER));
-        faction.power = maximumPower(id);
+        faction.power = baseMaximumPower(id);
         state.setDirty();
         return id;
+    }
+
+    public long createdAt(UUID factionId) {
+        return requireFaction(factionId).createdAt;
+    }
+
+    public boolean hasAnchor(UUID factionId) {
+        return requireData().anchors.values().stream().anyMatch(anchor -> anchor.factionId.equals(factionId));
     }
 
     public void disband(UUID factionId) {
@@ -213,7 +256,7 @@ public final class NativeFactionService {
         FactionRecord faction = requireFaction(factionId);
         if (!faction.invites.remove(playerId)) throw new IllegalStateException("Player is not invited");
         state.members.put(playerId, new MemberRecord(factionId, FactionRank.MEMBER));
-        faction.power = Math.min(maximumPower(factionId),
+        faction.power = Math.min(baseMaximumPower(factionId),
                 faction.power + TerraFactionsConfig.POWER_PER_MEMBER.get());
         state.setDirty();
     }
@@ -223,7 +266,7 @@ public final class NativeFactionService {
         MemberRecord member = state.members.get(playerId);
         if (member == null) return;
         if (member.rank == FactionRank.OWNER) throw new IllegalStateException("The owner must transfer ownership or disband");
-        int previousMaximum = maximumPower(member.factionId);
+        int previousMaximum = baseMaximumPower(member.factionId);
         state.members.remove(playerId);
         settings(playerId).chatMode = FactionChatMode.GLOBAL;
         preservePowerDeficit(member.factionId, previousMaximum);
@@ -235,7 +278,7 @@ public final class NativeFactionService {
         MemberRecord member = state.members.get(playerId);
         if (member == null || !member.factionId.equals(factionId)) throw new IllegalStateException("Player is not in that faction");
         if (member.rank == FactionRank.OWNER) throw new IllegalStateException("The faction owner cannot be kicked");
-        int previousMaximum = maximumPower(factionId);
+        int previousMaximum = baseMaximumPower(factionId);
         state.members.remove(playerId);
         settings(playerId).chatMode = FactionChatMode.GLOBAL;
         preservePowerDeficit(factionId, previousMaximum);
@@ -312,6 +355,48 @@ public final class NativeFactionService {
         return relation(ownerId, actor.id()) == FactionRelation.ALLIED;
     }
 
+    public boolean protectionEnabled(UUID factionId, TerritoryType territoryType, ProtectionAction action) {
+        FactionRecord faction = requireFaction(factionId);
+        int configured = territoryType == TerritoryType.BORDER
+                ? faction.borderProtections : faction.coreProtections;
+        return TerraFactionsConfig.protectionPolicy(territoryType, action)
+                .resolve(action.enabledIn(configured));
+    }
+
+    public int effectiveProtectionMask(UUID factionId, TerritoryType territoryType) {
+        int mask = 0;
+        for (ProtectionAction action : ProtectionAction.values()) {
+            if (protectionEnabled(factionId, territoryType, action)) mask |= action.bit();
+        }
+        return mask;
+    }
+
+    public int configurableProtectionMask(TerritoryType territoryType) {
+        int mask = 0;
+        for (ProtectionAction action : ProtectionAction.values()) {
+            if (TerraFactionsConfig.protectionPolicy(territoryType, action).configurable()) {
+                mask |= action.bit();
+            }
+        }
+        return mask;
+    }
+
+    public void setProtection(UUID factionId, TerritoryType territoryType,
+                              ProtectionAction action, boolean enabled) {
+        ProtectionPolicy policy = TerraFactionsConfig.protectionPolicy(territoryType, action);
+        if (!policy.configurable()) {
+            throw new IllegalStateException("That protection is forced "
+                    + (policy == ProtectionPolicy.FORCED_ON ? "on" : "off") + " by the server");
+        }
+        FactionRecord faction = requireFaction(factionId);
+        int configured = territoryType == TerritoryType.BORDER
+                ? faction.borderProtections : faction.coreProtections;
+        configured = enabled ? configured | action.bit() : configured & ~action.bit();
+        if (territoryType == TerritoryType.BORDER) faction.borderProtections = configured;
+        else faction.coreProtections = configured;
+        requireData().setDirty();
+    }
+
     public TerritoryClaim claim(TerritoryKey key) {
         return requireData().claims.get(key);
     }
@@ -364,6 +449,64 @@ public final class NativeFactionService {
 
     public void removeAnchor(String id) {
         if (requireData().anchors.remove(id) != null) requireData().setDirty();
+    }
+
+    /** Transfers one anchor and its currently owned projected footprint before global pressure reconciliation. */
+    public AnchorMapSnapshot transferAnchorTerritory(String id, UUID expectedOwner, UUID newOwner, long now) {
+        return transferAnchorTerritory(id, expectedOwner, newOwner, now, key -> key);
+    }
+
+    /** Transfers an anchor footprint using the world's canonical chunk topology. */
+    public AnchorMapSnapshot transferAnchorTerritory(String id, UUID expectedOwner, UUID newOwner, long now,
+                                                     UnaryOperator<TerritoryKey> normalizer) {
+        AnchorMapSnapshot anchor = anchor(id);
+        if (anchor == null) throw new IllegalArgumentException("Faction anchor does not exist");
+        if (!anchor.factionId().equals(expectedOwner)) {
+            throw new IllegalStateException("Faction anchor is no longer owned by the conquest target");
+        }
+        requireFaction(newOwner);
+        AnchorMapSnapshot transferred = new AnchorMapSnapshot(anchor.id(), newOwner, anchor.dimension(),
+                anchor.x(), anchor.y(), anchor.z(), anchor.tier(), anchor.allocatedPower(), 0,
+                anchor.priority(), anchor.projectedRadius(), anchor.projectedClaims(),
+                AnchorPowerState.UNPOWERED, AnchorConnectionState.ISOLATED,
+                AnchorVulnerabilityState.GRACE_PERIOD, now);
+        putAnchor(transferred);
+
+        TerritoryKey center = normalizer.apply(new TerritoryKey(anchor.dimension(),
+                Math.floorDiv(anchor.x(), 16), Math.floorDiv(anchor.z(), 16)));
+        TerritoryClaim centerClaim = requireData().claims.get(center);
+        if (centerClaim != null && centerClaim.factionId().equals(expectedOwner)) {
+            TerritoryType transferredType = centerClaim.projected() ? centerClaim.type() : TerritoryType.CORE;
+            requireData().claims.put(center,
+                    new TerritoryClaim(center, newOwner, transferredType, centerClaim.projected()));
+            FactionRecord previousOwner = requireFaction(expectedOwner);
+            if (center.equals(previousOwner.capital)) {
+                previousOwner.capital = null;
+                repairCapital(expectedOwner);
+            }
+        }
+        for (TerritoryKey key : TerritoryRules.circularProjection(
+                center, anchor.projectedRadius(), normalizer)) {
+            TerritoryClaim claim = requireData().claims.get(key);
+            if (claim != null && claim.projected() && claim.factionId().equals(expectedOwner)) {
+                requireData().claims.put(key, new TerritoryClaim(key, newOwner, claim.type(), true));
+            }
+        }
+        requireData().setDirty();
+        return transferred;
+    }
+
+    private void repairCapital(UUID factionId) {
+        FactionRecord faction = requireFaction(factionId);
+        TerritoryClaim replacement = requireData().claims.values().stream()
+                .filter(claim -> claim.factionId().equals(factionId) && !claim.projected())
+                .sorted(Comparator.comparing((TerritoryClaim claim) -> claim.key().dimension())
+                        .thenComparingInt(claim -> claim.key().x()).thenComparingInt(claim -> claim.key().z()))
+                .findFirst().orElse(null);
+        if (replacement == null) return;
+        faction.capital = replacement.key();
+        requireData().claims.put(replacement.key(), new TerritoryClaim(replacement.key(), factionId,
+                TerritoryType.CAPITAL, false));
     }
 
     public void putClaim(TerritoryKey key, UUID factionId, TerritoryType type) {
@@ -454,7 +597,7 @@ public final class NativeFactionService {
     public void adjustPower(UUID factionId, int amount) {
         FactionRecord faction = requireFaction(factionId);
         long adjusted = (long) faction.power + amount;
-        faction.power = (int) Math.max(Integer.MIN_VALUE, Math.min(maximumPower(factionId), adjusted));
+        faction.power = (int) Math.max(Integer.MIN_VALUE, Math.min(baseMaximumPower(factionId), adjusted));
         requireData().setDirty();
     }
 
@@ -503,14 +646,26 @@ public final class NativeFactionService {
 
     private void clampPower(UUID factionId) {
         FactionRecord faction = requireFaction(factionId);
-        faction.power = Math.min(faction.power, maximumPower(factionId));
+        faction.power = Math.min(faction.power, baseMaximumPower(factionId));
     }
 
     private void preservePowerDeficit(UUID factionId, int previousMaximum) {
         FactionRecord faction = requireFaction(factionId);
         long deficit = Math.max(0L, previousMaximum - (long) faction.power);
-        long adjusted = maximumPower(factionId) - deficit;
+        long adjusted = baseMaximumPower(factionId) - deficit;
         faction.power = (int) Math.max(Integer.MIN_VALUE, adjusted);
+    }
+
+    private int temporaryPower(UUID factionId) {
+        return Math.max(0, temporaryPowerProvider.applyAsInt(factionId));
+    }
+
+    private double powerSuppression(UUID factionId) {
+        return Math.max(0.0D, Math.min(1.0D, powerSuppressionProvider.applyAsDouble(factionId)));
+    }
+
+    private static int saturatedPositiveAdd(int first, int second) {
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(0L, (long) first + Math.max(0, second)));
     }
 
     private static int saturatedAdd(int first, int second) {

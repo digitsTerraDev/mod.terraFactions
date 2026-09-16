@@ -4,6 +4,10 @@ import dev.terrafactions.TerraFactions;
 import dev.terrafactions.factions.FactionChatMode;
 import dev.terrafactions.factions.FactionRank;
 import dev.terrafactions.factions.FactionRelation;
+import dev.terrafactions.war.WarCampState;
+import dev.terrafactions.war.WarGoalType;
+import dev.terrafactions.war.WarState;
+import dev.terrafactions.anchor.AnchorTier;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -16,12 +20,17 @@ import java.util.List;
 public record FactionUiPayload(
         String name, String description, String tag, int color, int rankOrdinal,
         int power, int maximumPower, int claimUsage, int deathLoss, int specialPower,
+        int temporaryPower, int suppressedPower, double suppressionPercent,
         int basePower, int powerPerMember, int coreClaimCost, int borderClaimCost,
         int capitalClaims, int coreClaims, int borderClaims, int projectedBorderClaims,
         int projectedClaimUsage, String capital,
-        boolean coreVulnerable, boolean borderVulnerable, boolean radarEnabled, int chatModeOrdinal,
+        boolean coreVulnerable, boolean borderVulnerable,
+        int coreProtectionMask, int borderProtectionMask,
+        int coreConfigurableProtectionMask, int borderConfigurableProtectionMask,
+        boolean radarEnabled, int chatModeOrdinal,
         List<MemberEntry> members, List<LossEntry> losses,
-        List<FactionEntry> factions, List<AdminFactionEntry> adminFactions) implements CustomPacketPayload {
+        List<FactionEntry> factions, List<WarEntry> wars, List<WarTargetEntry> warTargets,
+        List<AdminFactionEntry> adminFactions) implements CustomPacketPayload {
 
     public static final Type<FactionUiPayload> TYPE = new Type<>(
             ResourceLocation.fromNamespaceAndPath(TerraFactions.MOD_ID, "faction_ui"));
@@ -32,13 +41,16 @@ public record FactionUiPayload(
         members = List.copyOf(members);
         losses = List.copyOf(losses);
         factions = List.copyOf(factions);
+        wars = List.copyOf(wars);
+        warTargets = List.copyOf(warTargets);
         adminFactions = List.copyOf(adminFactions);
     }
 
     public static FactionUiPayload empty() {
         return new FactionUiPayload("", "", "", 0xAAAAAA, -1,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", false, false, true,
-                FactionChatMode.GLOBAL.ordinal(), List.of(), List.of(), List.of(), List.of());
+                0, 0, 0, 0, 0, 0, 0, 0.0D, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", false, false,
+                0, 0, 0, 0, true, FactionChatMode.GLOBAL.ordinal(),
+                List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
     }
 
     public boolean hasFaction() {
@@ -69,6 +81,9 @@ public record FactionUiPayload(
         buffer.writeInt(value.claimUsage);
         buffer.writeInt(value.deathLoss);
         buffer.writeInt(value.specialPower);
+        buffer.writeInt(value.temporaryPower);
+        buffer.writeInt(value.suppressedPower);
+        buffer.writeDouble(value.suppressionPercent);
         buffer.writeInt(value.basePower);
         buffer.writeInt(value.powerPerMember);
         buffer.writeInt(value.coreClaimCost);
@@ -81,6 +96,10 @@ public record FactionUiPayload(
         buffer.writeUtf(value.capital);
         buffer.writeBoolean(value.coreVulnerable);
         buffer.writeBoolean(value.borderVulnerable);
+        buffer.writeInt(value.coreProtectionMask);
+        buffer.writeInt(value.borderProtectionMask);
+        buffer.writeInt(value.coreConfigurableProtectionMask);
+        buffer.writeInt(value.borderConfigurableProtectionMask);
         buffer.writeBoolean(value.radarEnabled);
         buffer.writeInt(value.chatModeOrdinal);
         buffer.writeVarInt(value.members.size());
@@ -89,6 +108,10 @@ public record FactionUiPayload(
         value.losses.forEach(entry -> entry.write(buffer));
         buffer.writeVarInt(value.factions.size());
         value.factions.forEach(entry -> entry.write(buffer));
+        buffer.writeVarInt(value.wars.size());
+        value.wars.forEach(entry -> entry.write(buffer));
+        buffer.writeVarInt(value.warTargets.size());
+        value.warTargets.forEach(entry -> entry.write(buffer));
         buffer.writeVarInt(value.adminFactions.size());
         value.adminFactions.forEach(entry -> entry.write(buffer));
     }
@@ -104,6 +127,9 @@ public record FactionUiPayload(
         int claimUsage = buffer.readInt();
         int deathLoss = buffer.readInt();
         int specialPower = buffer.readInt();
+        int temporaryPower = buffer.readInt();
+        int suppressedPower = buffer.readInt();
+        double suppressionPercent = buffer.readDouble();
         int basePower = buffer.readInt();
         int powerPerMember = buffer.readInt();
         int coreClaimCost = buffer.readInt();
@@ -116,16 +142,28 @@ public record FactionUiPayload(
         String capital = buffer.readUtf();
         boolean coreVulnerable = buffer.readBoolean();
         boolean borderVulnerable = buffer.readBoolean();
+        int coreProtectionMask = buffer.readInt();
+        int borderProtectionMask = buffer.readInt();
+        int coreConfigurableProtectionMask = buffer.readInt();
+        int borderConfigurableProtectionMask = buffer.readInt();
         boolean radarEnabled = buffer.readBoolean();
         int chatMode = buffer.readInt();
         List<MemberEntry> members = readList(buffer, MemberEntry::read);
         List<LossEntry> losses = readList(buffer, LossEntry::read);
         List<FactionEntry> factions = readList(buffer, FactionEntry::read);
+        List<WarEntry> wars = readList(buffer, WarEntry::read);
+        List<WarTargetEntry> warTargets = readList(buffer, WarTargetEntry::read);
         List<AdminFactionEntry> adminFactions = readList(buffer, AdminFactionEntry::read);
         return new FactionUiPayload(name, description, tag, color, rank, power, maximumPower,
-                claimUsage, deathLoss, specialPower, basePower, powerPerMember, coreClaimCost, borderClaimCost,
+                claimUsage, deathLoss, specialPower, temporaryPower, suppressedPower, suppressionPercent,
+                basePower, powerPerMember,
+                coreClaimCost, borderClaimCost,
                 capitalClaims, coreClaims, borderClaims, projectedBorderClaims, projectedClaimUsage, capital,
-                coreVulnerable, borderVulnerable, radarEnabled, chatMode, members, losses, factions, adminFactions);
+                coreVulnerable, borderVulnerable,
+                coreProtectionMask, borderProtectionMask,
+                coreConfigurableProtectionMask, borderConfigurableProtectionMask,
+                radarEnabled, chatMode, members, losses, factions,
+                wars, warTargets, adminFactions);
     }
 
     private static <T> List<T> readList(RegistryFriendlyByteBuf buffer, Reader<T> reader) {
@@ -224,6 +262,100 @@ public record FactionUiPayload(
         static AdminFactionEntry read(RegistryFriendlyByteBuf buffer) {
             return new AdminFactionEntry(buffer.readUtf(), buffer.readUtf(4), buffer.readInt(),
                     buffer.readInt(), buffer.readInt(), buffer.readInt());
+        }
+    }
+
+    public record WarEntry(String id, String opponentName, int opponentColor, int stateOrdinal,
+                           boolean attacker, int ownGoalOrdinal, int enemyGoalOrdinal,
+                           int ownProgress, int ownRequired, boolean ownCompleted, boolean ownFailed,
+                           int campStateOrdinal, int occupiedAnchors, long preparationEndsAt,
+                           List<String> targetAnchorIds) {
+        public WarEntry {
+            targetAnchorIds = List.copyOf(targetAnchorIds);
+        }
+
+        void write(RegistryFriendlyByteBuf buffer) {
+            buffer.writeUtf(id, 36);
+            buffer.writeUtf(opponentName, 64);
+            buffer.writeInt(opponentColor);
+            buffer.writeInt(stateOrdinal);
+            buffer.writeBoolean(attacker);
+            buffer.writeInt(ownGoalOrdinal);
+            buffer.writeInt(enemyGoalOrdinal);
+            buffer.writeInt(ownProgress);
+            buffer.writeInt(ownRequired);
+            buffer.writeBoolean(ownCompleted);
+            buffer.writeBoolean(ownFailed);
+            buffer.writeInt(campStateOrdinal);
+            buffer.writeInt(occupiedAnchors);
+            buffer.writeLong(preparationEndsAt);
+            buffer.writeVarInt(targetAnchorIds.size());
+            targetAnchorIds.forEach(target -> buffer.writeUtf(target, 256));
+        }
+
+        static WarEntry read(RegistryFriendlyByteBuf buffer) {
+            String id = buffer.readUtf(36);
+            String opponent = buffer.readUtf(64);
+            int color = buffer.readInt();
+            int state = buffer.readInt();
+            boolean attacker = buffer.readBoolean();
+            int ownGoal = buffer.readInt();
+            int enemyGoal = buffer.readInt();
+            int progress = buffer.readInt();
+            int required = buffer.readInt();
+            boolean completed = buffer.readBoolean();
+            boolean failed = buffer.readBoolean();
+            int camp = buffer.readInt();
+            int occupied = buffer.readInt();
+            long preparation = buffer.readLong();
+            int targetCount = Math.min(buffer.readVarInt(), 4096);
+            List<String> targets = new ArrayList<>(targetCount);
+            for (int index = 0; index < targetCount; index++) targets.add(buffer.readUtf(256));
+            return new WarEntry(id, opponent, color, state, attacker, ownGoal, enemyGoal,
+                    progress, required, completed, failed, camp, occupied, preparation, targets);
+        }
+
+        public WarState state() {
+            return enumValue(WarState.values(), stateOrdinal, WarState.ENDED);
+        }
+
+        public WarGoalType ownGoal() {
+            return enumValue(WarGoalType.values(), ownGoalOrdinal, null);
+        }
+
+        public WarGoalType enemyGoal() {
+            return enumValue(WarGoalType.values(), enemyGoalOrdinal, null);
+        }
+
+        public WarCampState campState() {
+            return enumValue(WarCampState.values(), campStateOrdinal, null);
+        }
+    }
+
+    public record WarTargetEntry(String anchorId, String factionName, String dimension,
+                                 int x, int y, int z, int tierOrdinal, int allocatedPower,
+                                 boolean occupied, boolean breached) {
+        void write(RegistryFriendlyByteBuf buffer) {
+            buffer.writeUtf(anchorId, 256);
+            buffer.writeUtf(factionName, 64);
+            buffer.writeUtf(dimension, 256);
+            buffer.writeInt(x);
+            buffer.writeInt(y);
+            buffer.writeInt(z);
+            buffer.writeInt(tierOrdinal);
+            buffer.writeInt(allocatedPower);
+            buffer.writeBoolean(occupied);
+            buffer.writeBoolean(breached);
+        }
+
+        static WarTargetEntry read(RegistryFriendlyByteBuf buffer) {
+            return new WarTargetEntry(buffer.readUtf(256), buffer.readUtf(64), buffer.readUtf(256),
+                    buffer.readInt(), buffer.readInt(), buffer.readInt(), buffer.readInt(), buffer.readInt(),
+                    buffer.readBoolean(), buffer.readBoolean());
+        }
+
+        public AnchorTier tier() {
+            return enumValue(AnchorTier.values(), tierOrdinal, AnchorTier.BASIC);
         }
     }
 

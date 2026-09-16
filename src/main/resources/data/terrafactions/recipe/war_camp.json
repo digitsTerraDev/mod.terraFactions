@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "OBO",
+    "BLB",
+    "OBO"
+  ],
+  "key": {
+    "O": { "item": "minecraft:obsidian" },
+    "B": { "item": "minecraft:blaze_powder" },
+    "L": { "item": "minecraft:lodestone" }
+  },
+  "result": {
+    "id": "terrafactions:war_camp",
+    "count": 1
+  }
+}

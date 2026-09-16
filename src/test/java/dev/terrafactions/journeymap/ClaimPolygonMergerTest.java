@@ -2,6 +2,7 @@ package dev.terrafactions.journeymap;
 
 import dev.terrafactions.factions.FactionSnapshot.ClaimSnapshot;
 import dev.terrafactions.territory.TerritoryType;
+import dev.terrafactions.territory.TerritoryKey;
 import journeymap.api.v2.server.overlay.OverlayPolygon;
 import org.junit.jupiter.api.Test;
 
@@ -9,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ClaimPolygonMergerTest {
     @Test
@@ -58,6 +60,23 @@ class ClaimPolygonMergerTest {
         List<OverlayPolygon> polygons = ClaimPolygonMerger.merge(List.of(claim(0, 0), claim(1, 1)));
 
         assertEquals(2, polygons.size());
+    }
+
+    @Test
+    void unwrapsClaimsAcrossTheWorldEdgeIntoOneShortPolygon() {
+        List<OverlayPolygon> polygons = ClaimPolygonMerger.merge(
+                List.of(claim(0, 0), claim(9, 0)), ClaimPolygonMergerTest::wrapTen);
+
+        assertEquals(1, polygons.size());
+        List<Integer> pointXs = polygons.getFirst().outer().points().stream()
+                .map(packed -> (int) (packed >> 38)).toList();
+        assertEquals(4, pointXs.size());
+        assertTrue(pointXs.contains(-16));
+        assertTrue(pointXs.contains(16));
+    }
+
+    private static TerritoryKey wrapTen(TerritoryKey key) {
+        return new TerritoryKey(key.dimension(), Math.floorMod(key.x(), 10), key.z());
     }
 
     private static ClaimSnapshot claim(int x, int z) {

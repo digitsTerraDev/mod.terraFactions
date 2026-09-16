@@ -16,9 +16,19 @@ import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
 import net.minecraft.server.level.ServerPlayer;
 import dev.terrafactions.territory.TerritoryType;
+import dev.terrafactions.territory.TerraFactionsConfig;
 import dev.terrafactions.network.FactionActionPayload;
+import dev.terrafactions.war.WarGoalType;
+import dev.terrafactions.war.WarGoalSnapshot;
+import dev.terrafactions.war.WarManager;
+import dev.terrafactions.war.WarSnapshot;
+import dev.terrafactions.anchor.FactionAnchorBlockEntity;
+import dev.terrafactions.anchor.AnchorMapSnapshot;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 
 import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -31,13 +41,15 @@ public final class FactionCommandService {
     private static final int MAX_DESCRIPTION_LENGTH = 256;
 
     private final NativeFactionService factions;
+    private final WarManager wars;
     private final Runnable refreshDisplays;
     private final BiPredicate<UUID, TerritoryType> vulnerability;
     private final LegacyFactionImporter legacyImporter = new LegacyFactionImporter();
 
-    public FactionCommandService(NativeFactionService factions, Runnable refreshDisplays,
+    public FactionCommandService(NativeFactionService factions, WarManager wars, Runnable refreshDisplays,
                                  BiPredicate<UUID, TerritoryType> vulnerability) {
         this.factions = factions;
+        this.wars = wars;
         this.refreshDisplays = refreshDisplays;
         this.vulnerability = vulnerability;
     }
@@ -111,12 +123,8 @@ public final class FactionCommandService {
                                         StringArgumentType.getString(context, "faction")))))
                 .then(Commands.literal("list").executes(context -> list(context.getSource())))
                 .then(Commands.literal("power").executes(context -> power(context.getSource())))
-                .then(Commands.literal("admin").requires(source -> source.hasPermission(3))
-                        .then(Commands.literal("importlegacy")
-                                .then(Commands.literal("preview")
-                                        .executes(context -> previewLegacyImport(context.getSource())))
-                                .then(Commands.literal("confirm")
-                                        .executes(context -> confirmLegacyImport(context.getSource()))))));
+                .then(buildWarCommands())
+                .then(buildAdminCommands()));
     }
 
     /** Executes a typed dashboard request without routing it through Brigadier or parsing command text. */
@@ -203,11 +211,328 @@ public final class FactionCommandService {
         return Commands.literal(name).executes(context -> setChat(context.getSource(), mode));
     }
 
+    private LiteralArgumentBuilder<CommandSourceStack> buildWarCommands() {
+        LiteralArgumentBuilder<CommandSourceStack> declare = Commands.literal("declare");
+        for (WarGoalType goal : WarGoalType.values()) {
+            if (!goal.requiresWarCamp()) continue;
+            declare.then(Commands.literal(goal.name().toLowerCase(Locale.ROOT))
+                    .then(Commands.argument("faction", StringArgumentType.greedyString())
+                            .suggests(this::suggestFactionNames)
+                            .executes(context -> declareWar(context.getSource(), goal,
+                                    StringArgumentType.getString(context, "faction")))));
+        }
+        LiteralArgumentBuilder<CommandSourceStack> choose = Commands.literal("goal");
+        for (WarGoalType goal : WarGoalType.values()) {
+            choose.then(Commands.literal(goal.name().toLowerCase(Locale.ROOT))
+                    .then(Commands.argument("attacker", StringArgumentType.greedyString())
+                            .suggests(this::suggestFactionNames)
+                            .executes(context -> chooseWarGoal(context.getSource(), goal,
+                                    StringArgumentType.getString(context, "attacker")))));
+        }
+        return Commands.literal("war")
+                .executes(context -> listWars(context.getSource()))
+                .then(Commands.literal("list").executes(context -> listWars(context.getSource())))
+                .then(Commands.literal("camp")
+                        .then(Commands.argument("opponent", StringArgumentType.greedyString())
+                                .suggests(this::suggestFactionNames)
+                                .executes(context -> selectWarCamp(context.getSource(),
+                                        StringArgumentType.getString(context, "opponent")))))
+                .then(Commands.literal("target")
+                        .then(warTargetLiteral("add", true))
+                        .then(warTargetLiteral("remove", false))
+                        .then(Commands.literal("list")
+                                .then(Commands.argument("opponent", StringArgumentType.greedyString())
+                                        .suggests(this::suggestFactionNames)
+                                        .executes(context -> listWarTargets(context.getSource(),
+                                                StringArgumentType.getString(context, "opponent"))))))
+                .then(declare)
+                .then(choose);
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> buildAdminCommands() {
+        return Commands.literal("admin").requires(source -> source.hasPermission(3))
+                .then(Commands.literal("war")
+                        .then(Commands.literal("list")
+                                .executes(context -> listAdminWars(context.getSource())))
+                        .then(Commands.literal("end")
+                                .then(Commands.argument("war", StringArgumentType.word())
+                                        .suggests(this::suggestUnresolvedWarIds)
+                                        .executes(context -> forceEndWar(context.getSource(),
+                                                StringArgumentType.getString(context, "war"))))))
+                .then(Commands.literal("faction")
+                        .then(Commands.literal("disband")
+                                .then(Commands.argument("faction", StringArgumentType.greedyString())
+                                        .suggests(this::suggestFactionNames)
+                                        .executes(context -> forceDisbandFaction(context.getSource(),
+                                                StringArgumentType.getString(context, "faction"))))))
+                .then(Commands.literal("importlegacy")
+                        .then(Commands.literal("preview")
+                                .executes(context -> previewLegacyImport(context.getSource())))
+                        .then(Commands.literal("confirm")
+                                .executes(context -> confirmLegacyImport(context.getSource()))));
+    }
+
+    private int listAdminWars(CommandSourceStack source) {
+        List<WarSnapshot> entries = wars.allWars().stream()
+                .filter(war -> war.state() != dev.terrafactions.war.WarState.ENDED)
+                .toList();
+        if (entries.isEmpty()) {
+            source.sendSuccess(() -> Component.literal("There are no unresolved wars."), false);
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal("Unresolved wars (" + entries.size() + "):"), false);
+        for (WarSnapshot war : entries) {
+            source.sendSuccess(() -> Component.literal(shortId(war.id()) + " | " + war.state().name()
+                    + " | " + factions.factionName(war.attackerFactionId()) + " vs "
+                    + factions.factionName(war.defenderFactionId())), false);
+        }
+        return entries.size();
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> warTargetLiteral(String name, boolean add) {
+        return Commands.literal(name)
+                .then(Commands.argument("opponent", StringArgumentType.greedyString())
+                        .suggests(this::suggestFactionNames)
+                        .executes(context -> changeWarTarget(context.getSource(),
+                                StringArgumentType.getString(context, "opponent"), add)));
+    }
+
+    private int declareWar(CommandSourceStack source, WarGoalType goal, String defenderName)
+            throws CommandSyntaxException {
+        FactionIdentity actor = requireLeadership(source);
+        UUID defenderId = factions.factionByName(defenderName.trim());
+        if (defenderId == null) return fail(source, "No faction named " + defenderName.trim() + " exists.");
+        try {
+            WarGoalSnapshot selectedGoal = WarGoalSnapshot.selected(goal);
+            if (usesAnchorTargets(goal)) {
+                String target = lookedAtAnchor(source, defenderId);
+                if (target == null) {
+                    return fail(source, "Look directly at an enemy faction anchor before declaring "
+                            + goal.name() + ".");
+                }
+                selectedGoal = selectedGoal.withTargets(java.util.Set.of(target));
+            }
+            WarSnapshot war = wars.declareWar(actor.id(), defenderId, selectedGoal);
+            long seconds = Math.max(0L, war.preparationEndsAt() - war.declaredAt()) / 20L;
+            return success(source, "Declared " + goal.name().toLowerCase(Locale.ROOT) + " war on "
+                    + factions.factionName(defenderId) + ". Preparation lasts " + seconds + " seconds. War ID: "
+                    + shortId(war.id()) + ".");
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            return fail(source, exception.getMessage());
+        }
+    }
+
+    private int chooseWarGoal(CommandSourceStack source, WarGoalType goal, String attackerName)
+            throws CommandSyntaxException {
+        FactionIdentity actor = requireLeadership(source);
+        UUID attackerId = factions.factionByName(attackerName.trim());
+        if (attackerId == null) return fail(source, "No faction named " + attackerName.trim() + " exists.");
+        WarSnapshot war = wars.getWarBetweenFactions(actor.id(), attackerId);
+        if (war == null) return fail(source, "There is no unresolved war between those factions.");
+        try {
+            WarGoalSnapshot selectedGoal = WarGoalSnapshot.selected(goal);
+            if (usesAnchorTargets(goal)) {
+                String target = lookedAtAnchor(source, attackerId);
+                if (target != null) selectedGoal = selectedGoal.withTargets(java.util.Set.of(target));
+            }
+            wars.chooseDefenderGoal(war.id(), actor.id(), selectedGoal);
+            return success(source, "Selected " + goal.name().toLowerCase(Locale.ROOT)
+                    + " for war " + shortId(war.id()) + "."
+                    + (usesAnchorTargets(goal) && selectedGoal.targetAnchorIds().isEmpty()
+                    ? " Add at least one target before preparation ends." : ""));
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            return fail(source, exception.getMessage());
+        }
+    }
+
+    private int listWars(CommandSourceStack source) throws CommandSyntaxException {
+        FactionIdentity actor = requireMember(source);
+        List<WarSnapshot> entries = wars.getWarsForFaction(actor.id()).stream()
+                .filter(war -> war.state() != dev.terrafactions.war.WarState.ENDED).toList();
+        if (entries.isEmpty()) return success(source, "Your faction has no unresolved wars.");
+        source.sendSuccess(() -> Component.literal("Wars (" + entries.size() + "):"), false);
+        for (WarSnapshot war : entries) {
+            WarSideSnapshotView view = warView(war, actor.id());
+            source.sendSuccess(() -> Component.literal(shortId(war.id()) + " | " + war.state().name()
+                    + " | vs " + factions.factionName(view.opponentId()) + " | Your goal: "
+                    + goalName(view.ownGoal()) + " | Camp: " + campState(war.side(actor.id()))
+                    + " | Occupied: " + wars.getOccupations(war.id(), actor.id()).size()
+                    + " | Breaches: " + wars.getPlunderBreaches(war.id(), actor.id()).stream()
+                    .filter(breach -> breach.active(source.getServer().overworld().getGameTime())).count()
+                    + " | Enemy goal: " + goalName(view.enemyGoal())), false);
+        }
+        return entries.size();
+    }
+
+    private int selectWarCamp(CommandSourceStack source, String opponentName) throws CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        FactionIdentity actor = requireLeadership(source);
+        UUID opponentId = factions.factionByName(opponentName.trim());
+        if (opponentId == null) return fail(source, "No faction named " + opponentName.trim() + " exists.");
+        WarSnapshot war = wars.getWarBetweenFactions(actor.id(), opponentId);
+        if (war == null) return fail(source, "There is no unresolved war between those factions.");
+        try {
+            wars.selectWarCampWar(player, actor.id(), war.id());
+            return success(source, "The held War Camp is assigned against "
+                    + factions.factionName(opponentId) + " (" + shortId(war.id()) + ").");
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            return fail(source, exception.getMessage());
+        }
+    }
+
+    private int forceEndWar(CommandSourceStack source, String reference) {
+        String normalized = reference.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isEmpty()) return fail(source, "A war ID or unique prefix is required.");
+        List<WarSnapshot> matches = wars.allWars().stream()
+                .filter(war -> war.state() != dev.terrafactions.war.WarState.ENDED)
+                .filter(war -> war.id().toString().startsWith(normalized))
+                .toList();
+        if (matches.isEmpty()) return fail(source, "No unresolved war matches " + reference.trim() + ".");
+        if (matches.size() > 1) return fail(source, "That war ID prefix is ambiguous; enter more characters.");
+
+        WarSnapshot war = matches.getFirst();
+        String attacker = factions.factionName(war.attackerFactionId());
+        String defender = factions.factionName(war.defenderFactionId());
+        wars.forceEndWar(war.id(), source.getServer().overworld().getGameTime(),
+                "Force-ended by administrator " + source.getTextName());
+        return success(source, "Force-ended war " + shortId(war.id()) + " between "
+                + attacker + " and " + defender + ".");
+    }
+
+    private int forceDisbandFaction(CommandSourceStack source, String factionName) {
+        String requested = factionName.trim();
+        UUID factionId = factions.factionByName(requested);
+        if (factionId == null) return fail(source, "No faction named " + requested + " exists.");
+        String name = factions.factionName(factionId);
+        long unresolvedWars = wars.getWarsForFaction(factionId).stream()
+                .filter(war -> war.state() != dev.terrafactions.war.WarState.ENDED)
+                .count();
+        wars.cancelWarsForFaction(factionId, source.getServer().overworld().getGameTime(),
+                "Faction force-disbanded by administrator " + source.getTextName());
+        factions.disband(factionId);
+        refreshDisplays.run();
+        return success(source, "Force-disbanded " + name + " and cancelled " + unresolvedWars
+                + " unresolved war" + (unresolvedWars == 1 ? "" : "s") + ".");
+    }
+
+    private int changeWarTarget(CommandSourceStack source, String opponentName, boolean add)
+            throws CommandSyntaxException {
+        FactionIdentity actor = requireLeadership(source);
+        UUID opponentId = factions.factionByName(opponentName.trim());
+        if (opponentId == null) return fail(source, "No faction named " + opponentName.trim() + " exists.");
+        WarSnapshot war = wars.getWarBetweenFactions(actor.id(), opponentId);
+        if (war == null) return fail(source, "There is no unresolved war between those factions.");
+        String anchorId = lookedAtAnchor(source, opponentId);
+        if (anchorId == null) return fail(source, "Look directly at one of that faction's anchors.");
+        try {
+            WarSnapshot updated = add
+                    ? wars.addWarGoalTarget(war.id(), actor.id(), anchorId)
+                    : wars.removeWarGoalTarget(war.id(), actor.id(), anchorId);
+            WarGoalType goalType = updated.side(actor.id()).warGoal().type();
+            return success(source, (add ? "Added" : "Removed") + " "
+                    + goalType.name().toLowerCase(Locale.ROOT) + " target at "
+                    + anchorPosition(anchorId) + ". Targets: "
+                    + updated.side(actor.id()).warGoal().targetAnchorIds().size() + ".");
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            return fail(source, exception.getMessage());
+        }
+    }
+
+    private int listWarTargets(CommandSourceStack source, String opponentName)
+            throws CommandSyntaxException {
+        FactionIdentity actor = requireMember(source);
+        UUID opponentId = factions.factionByName(opponentName.trim());
+        if (opponentId == null) return fail(source, "No faction named " + opponentName.trim() + " exists.");
+        WarSnapshot war = wars.getWarBetweenFactions(actor.id(), opponentId);
+        if (war == null) return fail(source, "There is no unresolved war between those factions.");
+        var goal = war.side(actor.id()).warGoal();
+        if (goal == null || !usesAnchorTargets(goal.type())) {
+            return fail(source, "Your faction's selected goal does not use anchor targets.");
+        }
+        String goalName = goal.type().name().toLowerCase(Locale.ROOT);
+        if (goal.targetAnchorIds().isEmpty()) return success(source, "No " + goalName + " targets selected.");
+        source.sendSuccess(() -> Component.literal(goalName + " targets (" + goal.progress() + "/"
+                + goal.targetAnchorIds().size() + "):"), false);
+        for (String target : goal.targetAnchorIds().stream().sorted().toList()) {
+            boolean occupied = wars.getOccupation(target) != null
+                    && actor.id().equals(wars.getOccupation(target).occupyingFactionId());
+            boolean breached = goal.type() == WarGoalType.PLUNDER
+                    && wars.getPlunderBreaches(war.id(), actor.id()).stream()
+                    .anyMatch(breach -> breach.anchorId().equals(target));
+            String state = breached ? "[breached] " : occupied ? "[occupied] " : "[open] ";
+            source.sendSuccess(() -> Component.literal(state
+                    + anchorPosition(target)), false);
+        }
+        return goal.targetAnchorIds().size();
+    }
+
+    private static boolean usesAnchorTargets(WarGoalType goal) {
+        return goal == WarGoalType.CONQUEST || goal == WarGoalType.PLUNDER;
+    }
+
+    private String lookedAtAnchor(CommandSourceStack source, UUID expectedOwner) throws CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        HitResult hit = player.pick(8.0D, 1.0F, false);
+        if (!(hit instanceof BlockHitResult blockHit)
+                || !(player.level().getBlockEntity(blockHit.getBlockPos()) instanceof FactionAnchorBlockEntity)) {
+            return null;
+        }
+        String id = player.level().dimension().location() + "/" + blockHit.getBlockPos().asLong();
+        AnchorMapSnapshot anchor = factions.anchor(id);
+        return anchor != null && anchor.factionId().equals(expectedOwner) ? id : null;
+    }
+
+    private String anchorPosition(String anchorId) {
+        AnchorMapSnapshot anchor = factions.anchor(anchorId);
+        return anchor == null ? anchorId : anchor.x() + ", " + anchor.y() + ", " + anchor.z()
+                + " (" + anchor.dimension() + ")";
+    }
+
+    private String campState(dev.terrafactions.war.WarSideSnapshot side) {
+        if (side == null || side.warCampId() == null) return "not placed";
+        dev.terrafactions.war.WarCampSnapshot camp = wars.getWarCamp(side.warCampId());
+        return camp == null ? "missing" : camp.state().name().toLowerCase(Locale.ROOT);
+    }
+
+    private static WarSideSnapshotView warView(WarSnapshot war, UUID factionId) {
+        boolean attacker = war.attackerFactionId().equals(factionId);
+        return new WarSideSnapshotView(attacker ? war.defenderFactionId() : war.attackerFactionId(),
+                attacker ? war.attacker().warGoal() : war.defender().warGoal(),
+                attacker ? war.defender().warGoal() : war.attacker().warGoal());
+    }
+
+    private static String goalName(dev.terrafactions.war.WarGoalSnapshot goal) {
+        if (goal == null) return "not selected";
+        String name = goal.type().name().toLowerCase(Locale.ROOT);
+        if (usesAnchorTargets(goal.type())) {
+            return name + " " + goal.progress() + "/" + goal.targetAnchorIds().size();
+        }
+        return goal.type() == WarGoalType.PUNITIVE
+                ? name + " " + goal.progress() + "/" + goal.requiredObjectiveValue() + " power"
+                : name;
+    }
+
+    private static String shortId(UUID id) {
+        return id.toString().substring(0, 8);
+    }
+
+    private record WarSideSnapshotView(UUID opponentId, dev.terrafactions.war.WarGoalSnapshot ownGoal,
+                                       dev.terrafactions.war.WarGoalSnapshot enemyGoal) {
+    }
+
     private CompletableFuture<Suggestions> suggestFactionNames(
             com.mojang.brigadier.context.CommandContext<CommandSourceStack> context,
             SuggestionsBuilder builder) {
         return SharedSuggestionProvider.suggest(
                 factions.allFactions().stream().map(FactionSnapshot::name), builder);
+    }
+
+    private CompletableFuture<Suggestions> suggestUnresolvedWarIds(
+            com.mojang.brigadier.context.CommandContext<CommandSourceStack> context,
+            SuggestionsBuilder builder) {
+        return SharedSuggestionProvider.suggest(wars.allWars().stream()
+                .filter(war -> war.state() != dev.terrafactions.war.WarState.ENDED)
+                .map(war -> shortId(war.id())), builder);
     }
 
     private LiteralArgumentBuilder<CommandSourceStack> buildTagCommands() {
@@ -224,9 +549,12 @@ public final class FactionCommandService {
         String name = validName(requestedName);
         if (name == null) return fail(source, "Faction names must contain 1-32 visible characters.");
         try {
-            UUID factionId = factions.createFaction(player.getUUID(), name);
+            long now = source.getServer().overworld().getGameTime();
+            UUID factionId = factions.createFaction(player.getUUID(), name, now);
             refreshDisplays.run();
-            return success(source, "Created " + name + " with tag [" + factions.tag(factionId) + "].");
+            long seconds = TerraFactionsConfig.FACTION_ANCHOR_PLACEMENT_DEADLINE_TICKS.get() / 20L;
+            return success(source, "Created " + name + " with tag [" + factions.tag(factionId)
+                    + "]. Place your first faction anchor within " + seconds + " seconds.");
         } catch (IllegalArgumentException | IllegalStateException exception) {
             return fail(source, exception.getMessage());
         }
@@ -247,6 +575,8 @@ public final class FactionCommandService {
         if (actor == null) return fail(source, "You do not belong to a faction.");
         if (actor.rank() != FactionRank.OWNER) return fail(source, "Only the faction owner can disband it.");
         String name = factions.factionName(actor.id());
+        wars.cancelWarsForFaction(actor.id(), source.getServer().overworld().getGameTime(),
+                "Faction disbanded");
         factions.disband(actor.id());
         refreshDisplays.run();
         return success(source, "Disbanded " + name + ".");
@@ -431,6 +761,9 @@ public final class FactionCommandService {
         if (power.specialPower() != 0) source.sendSuccess(() -> Component.literal(
                 "Special " + (power.specialPower() > 0 ? "addition: +" : "subtraction: -")
                         + Math.abs((long) power.specialPower())), false);
+        if (power.temporaryPower() > 0) source.sendSuccess(() -> Component.literal(
+                "Conquest Integration Power: +" + power.temporaryPower() + " (decaying)"), false);
+        showPunitiveSuppression(source, power);
         showVulnerability(source, factionId, "Core", TerritoryType.CORE);
         showVulnerability(source, factionId, "Border", TerritoryType.BORDER);
         showDeathLosses(source, power);
@@ -463,8 +796,18 @@ public final class FactionCommandService {
         if (power.specialPower() != 0) source.sendSuccess(() -> Component.literal(
                 "Special " + (power.specialPower() > 0 ? "addition: +" : "subtraction: -")
                         + Math.abs((long) power.specialPower())), false);
+        if (power.temporaryPower() > 0) source.sendSuccess(() -> Component.literal(
+                "Conquest Integration Power: +" + power.temporaryPower() + " (decaying)"), false);
+        showPunitiveSuppression(source, power);
         showDeathLosses(source, power);
         return 1;
+    }
+
+    private static void showPunitiveSuppression(CommandSourceStack source, FactionPower power) {
+        if (power.suppressedPower() <= 0) return;
+        source.sendSuccess(() -> Component.literal("Punitive suppression: "
+                + Math.round(power.suppressionPercent() * 100.0D) + "% (-"
+                + power.suppressedPower() + " power)"), false);
     }
 
     private void showDeathLosses(CommandSourceStack source, FactionPower power) {

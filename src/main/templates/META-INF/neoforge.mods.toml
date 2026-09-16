@@ -11,6 +11,10 @@ description='''
 A standalone NeoForge factions system with weighted core and border territory, relation-aware tags, and JourneyMap overlays.
 '''
 
+[[mixins]]
+config="terrafactions.create.mixins.json"
+requiredMods=["create"]
+
 [[dependencies.${mod_id}]]
 modId="neoforge"
 type="required"
@@ -36,5 +40,19 @@ side="BOTH"
 modId="journeymap"
 type="optional"
 versionRange="[1.21.1-6.0.0,)"
+ordering="AFTER"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="create"
+type="optional"
+versionRange="[6.0.0,7.0.0)"
+ordering="AFTER"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="toroidal_world"
+type="optional"
+versionRange="[0.16.8,)"
 ordering="AFTER"
 side="BOTH"

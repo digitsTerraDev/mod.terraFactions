@@ -7,6 +7,7 @@ import dev.terrafactions.anchor.AnchorVulnerabilityState;
 import dev.terrafactions.territory.TerritoryClaim;
 import dev.terrafactions.territory.TerritoryKey;
 import dev.terrafactions.territory.TerritoryType;
+import dev.terrafactions.territory.ProtectionAction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -52,11 +53,18 @@ public final class NativeFactionData extends SavedData {
             if (!entry.hasUUID("id")) continue;
             UUID id = entry.getUUID("id");
             FactionRecord faction = new FactionRecord(id, entry.getString("name"));
+            faction.createdAt = entry.contains("created_at") ? entry.getLong("created_at") : -1L;
             faction.description = entry.getString("description");
             faction.tag = entry.getString("tag");
             faction.color = entry.getInt("color");
             faction.power = entry.getInt("power");
             faction.specialPower = entry.getInt("special_power");
+            if (entry.contains("core_protections", Tag.TAG_INT)) {
+                faction.coreProtections = entry.getInt("core_protections");
+            }
+            if (entry.contains("border_protections", Tag.TAG_INT)) {
+                faction.borderProtections = entry.getInt("border_protections");
+            }
             ListTag deathLosses = entry.getList("death_losses", Tag.TAG_COMPOUND);
             for (int j = 0; j < deathLosses.size(); j++) {
                 CompoundTag loss = deathLosses.getCompound(j);
@@ -195,6 +203,9 @@ public final class NativeFactionData extends SavedData {
             entry.putInt("color", faction.color);
             entry.putInt("power", faction.power);
             entry.putInt("special_power", faction.specialPower);
+            entry.putInt("core_protections", faction.coreProtections);
+            entry.putInt("border_protections", faction.borderProtections);
+            if (faction.createdAt >= 0L) entry.putLong("created_at", faction.createdAt);
             ListTag deathLosses = new ListTag();
             for (Map.Entry<UUID, Integer> loss : faction.deathLosses.entrySet()) {
                 if (loss.getValue() <= 0) continue;
@@ -314,6 +325,9 @@ public final class NativeFactionData extends SavedData {
         int color = 0xAAAAAA;
         int power;
         int specialPower;
+        int coreProtections = ProtectionAction.defaultMask(TerritoryType.CORE);
+        int borderProtections = ProtectionAction.defaultMask(TerritoryType.BORDER);
+        long createdAt = -1L;
         final Map<UUID, Integer> deathLosses = new HashMap<>();
         TerritoryKey capital;
         final Set<UUID> invites = new HashSet<>();

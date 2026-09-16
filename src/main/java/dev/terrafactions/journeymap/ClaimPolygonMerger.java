@@ -1,10 +1,13 @@
 package dev.terrafactions.journeymap;
 
 import dev.terrafactions.factions.FactionSnapshot.ClaimSnapshot;
+import dev.terrafactions.territory.TerritoryKey;
 import journeymap.api.v2.server.overlay.OverlayPoints;
 import journeymap.api.v2.server.overlay.OverlayPolygon;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.Comparator;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -12,19 +15,60 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 final class ClaimPolygonMerger {
     private static final int CHUNK_SIZE = 16;
     private static final int POLYGON_Y = 64;
+    private static final int[][] DIRECTIONS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
     private ClaimPolygonMerger() {
     }
 
     static List<OverlayPolygon> merge(Collection<ClaimSnapshot> claims) {
-        Set<Cell> cells = new HashSet<>();
+        return merge(claims, key -> key);
+    }
+
+    static List<OverlayPolygon> merge(Collection<ClaimSnapshot> claims,
+                                      UnaryOperator<TerritoryKey> normalizer) {
+        Set<Cell> cells = unwrap(claims, normalizer);
+
+        return mergeCells(cells);
+    }
+
+    private static Set<Cell> unwrap(Collection<ClaimSnapshot> claims,
+                                    UnaryOperator<TerritoryKey> normalizer) {
+        Set<TerritoryKey> canonical = new HashSet<>();
         for (ClaimSnapshot claim : claims) {
-            cells.add(new Cell(claim.x(), claim.z()));
+            canonical.add(normalizer.apply(new TerritoryKey(claim.dimension(), claim.x(), claim.z())));
         }
+
+        Map<TerritoryKey, Cell> unwrapped = new HashMap<>();
+        List<TerritoryKey> roots = canonical.stream()
+                .sorted(Comparator.comparing(TerritoryKey::dimension)
+                        .thenComparingInt(TerritoryKey::x).thenComparingInt(TerritoryKey::z))
+                .toList();
+        for (TerritoryKey root : roots) {
+            if (unwrapped.containsKey(root)) continue;
+            unwrapped.put(root, new Cell(root.x(), root.z()));
+            ArrayDeque<TerritoryKey> pending = new ArrayDeque<>();
+            pending.add(root);
+            while (!pending.isEmpty()) {
+                TerritoryKey current = pending.removeFirst();
+                Cell position = unwrapped.get(current);
+                for (int[] direction : DIRECTIONS) {
+                    TerritoryKey neighbor = normalizer.apply(current.offset(direction[0], direction[1]));
+                    if (!canonical.contains(neighbor) || unwrapped.containsKey(neighbor)) continue;
+                    unwrapped.put(neighbor,
+                            new Cell(position.x() + direction[0], position.z() + direction[1]));
+                    pending.addLast(neighbor);
+                }
+            }
+        }
+        return new HashSet<>(unwrapped.values());
+    }
+
+    private static List<OverlayPolygon> mergeCells(Set<Cell> cells) {
 
         Set<Edge> remaining = new LinkedHashSet<>();
         for (Cell cell : cells) {

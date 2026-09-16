@@ -10,6 +10,7 @@ import dev.terrafactions.anchor.AnchorPowerState;
 import dev.terrafactions.anchor.AnchorConnectionState;
 import dev.terrafactions.anchor.AnchorVulnerabilityState;
 import dev.terrafactions.anchor.AnchorNetworkRules;
+import dev.terrafactions.compat.toroidal.ToroidalTerritoryCompat;
 import dev.terrafactions.factions.FactionIdentity;
 import dev.terrafactions.factions.FactionCommandService;
 import dev.terrafactions.factions.FactionPower;
@@ -27,11 +28,32 @@ import dev.terrafactions.network.JourneyMapClaimPayload;
 import dev.terrafactions.network.AnchorPowerPayload;
 import dev.terrafactions.network.AnchorStatePayload;
 import dev.terrafactions.network.AnchorStateRequestPayload;
+import dev.terrafactions.war.WarManager;
+import dev.terrafactions.war.AnchorOccupationSnapshot;
+import dev.terrafactions.war.AnchorSiegeSnapshot;
+import dev.terrafactions.war.AnchorSiegeResult;
+import dev.terrafactions.war.WarCampSnapshot;
+import dev.terrafactions.war.WarSideSnapshot;
+import dev.terrafactions.war.WarSnapshot;
+import dev.terrafactions.war.WarState;
+import dev.terrafactions.war.WarGoalSnapshot;
+import dev.terrafactions.war.WarGoalType;
+import dev.terrafactions.war.event.AnchorAnnexedEvent;
+import dev.terrafactions.war.event.PowerSuppressionAppliedEvent;
+import dev.terrafactions.war.event.WarDeclaredEvent;
+import dev.terrafactions.war.event.WarStartedEvent;
+import dev.terrafactions.war.event.WarEndedEvent;
+import dev.terrafactions.war.event.WarGoalCompletedEvent;
+import dev.terrafactions.war.event.WarCampDestroyedEvent;
+import dev.terrafactions.war.event.AnchorOccupiedEvent;
+import net.minecraft.core.BlockPos;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerBossEvent;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.BossEvent;
 import net.minecraft.world.level.ChunkPos;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.fml.ModList;
@@ -49,6 +71,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -60,14 +83,18 @@ public final class TerritoryService {
             new SimpleCommandExceptionType(Component.literal("Faction guests cannot manage territory."));
 
     private final NativeFactionService factions = new NativeFactionService();
+    private final WarManager wars = new WarManager(factions);
     private final FactionDisplayService displays = new FactionDisplayService(this, factions);
     private final FactionCommandService factionCommands = new FactionCommandService(
-            factions, displays::refreshNow, this::isVulnerable);
+            factions, wars, displays::refreshNow, this::isVulnerable);
     private final Map<UUID, TerritoryRadarPayload> radarStates = new HashMap<>();
     private final Map<UUID, FactionUiPayload> factionUiStates = new HashMap<>();
     private final Set<UUID> dirtyNetworks = new HashSet<>();
     private final Map<UUID, Long> knownPowerBudgets = new HashMap<>();
     private final Map<UUID, Long> corePowerUsageCache = new HashMap<>();
+    private final Map<CapturePresence, ServerBossEvent> captureBossBars = new HashMap<>();
+    private final Map<CapturePresence, Long> captureBossBarExpiry = new HashMap<>();
+    private final Set<UUID> hiddenHudPlayers = new HashSet<>();
     private MinecraftServer server;
 
     public void register() {
@@ -76,6 +103,14 @@ public final class TerritoryService {
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
         NeoForge.EVENT_BUS.addListener(this::onPlayerTick);
         NeoForge.EVENT_BUS.addListener(this::onLivingDeath);
+        NeoForge.EVENT_BUS.addListener(this::onAnchorAnnexed);
+        NeoForge.EVENT_BUS.addListener(this::onPowerSuppressionApplied);
+        NeoForge.EVENT_BUS.addListener(this::onWarDeclared);
+        NeoForge.EVENT_BUS.addListener(this::onWarStarted);
+        NeoForge.EVENT_BUS.addListener(this::onWarEnded);
+        NeoForge.EVENT_BUS.addListener(this::onWarGoalCompleted);
+        NeoForge.EVENT_BUS.addListener(this::onWarCampDestroyed);
+        NeoForge.EVENT_BUS.addListener(this::onAnchorOccupied);
         NeoForge.EVENT_BUS.addListener(EventPriority.LOWEST, this::onRegisterCommands);
         new TerritoryProtection(this, factions).register();
         displays.register();
@@ -84,6 +119,7 @@ public final class TerritoryService {
     private void onServerStarted(ServerStartedEvent event) {
         server = event.getServer();
         factions.initialize(server);
+        wars.initialize(server);
         reconcileCapitals();
         factions.allFactions().forEach(faction -> dirtyNetworks.add(faction.id()));
     }
@@ -94,6 +130,11 @@ public final class TerritoryService {
         dirtyNetworks.clear();
         knownPowerBudgets.clear();
         corePowerUsageCache.clear();
+        captureBossBars.values().forEach(ServerBossEvent::removeAllPlayers);
+        captureBossBars.clear();
+        captureBossBarExpiry.clear();
+        hiddenHudPlayers.clear();
+        wars.stop();
         factions.stop();
         server = null;
     }
@@ -103,6 +144,7 @@ public final class TerritoryService {
             return;
         }
         int tick = event.getServer().getTickCount();
+        wars.tick(event.getServer().overworld().getGameTime());
         if (tick % TerraFactionsConfig.POWER_REGEN_INTERVAL_TICKS.get() == 0) {
             factions.regeneratePower();
             factions.allFactions().forEach(faction -> dirtyNetworks.add(faction.id()));
@@ -112,12 +154,29 @@ public final class TerritoryService {
         }
         processDirtyNetworks(event.getServer());
         if (tick % 20 == 0) {
+            progressPresenceCaptures(event.getServer());
+            hiddenHudPlayers.removeIf(playerId ->
+                    event.getServer().getPlayerList().getPlayer(playerId) == null);
             radarStates.keySet().removeIf(playerId ->
                     event.getServer().getPlayerList().getPlayer(playerId) == null);
             factionUiStates.keySet().removeIf(playerId ->
                     event.getServer().getPlayerList().getPlayer(playerId) == null);
+            expireUnanchoredFactions(event.getServer().overworld().getGameTime());
             reconcileCapitals();
             detectPowerAndIsolationChanges(event.getServer());
+        }
+    }
+
+    private void expireUnanchoredFactions(long now) {
+        for (FactionSnapshot faction : factions.allFactions()) {
+            long createdAt = factions.createdAt(faction.id());
+            if (createdAt < 0L || factions.hasAnchor(faction.id())
+                    || now < createdAt + TerraFactionsConfig.FACTION_ANCHOR_PLACEMENT_DEADLINE_TICKS.get()) continue;
+            notifyFaction(faction.id(), Component.literal("Your faction was disbanded because it did not place an anchor in time."));
+            wars.cancelWarsForFaction(faction.id(), now, "Faction failed to establish an anchor");
+            factions.disband(faction.id());
+            dirtyNetworks.remove(faction.id());
+            displays.refreshNow();
         }
     }
 
@@ -140,6 +199,71 @@ public final class TerritoryService {
             factions.recordDeath(identity.id(), victim.getUUID(), TerraFactionsConfig.DEATH_POWER_PENALTY.get());
             dirtyNetworks.add(identity.id());
         }
+    }
+
+    private void onAnchorAnnexed(AnchorAnnexedEvent event) {
+        dirtyNetworks.add(event.occupation().originalOwnerFactionId());
+        dirtyNetworks.add(event.occupation().occupyingFactionId());
+    }
+
+    private void onPowerSuppressionApplied(PowerSuppressionAppliedEvent event) {
+        dirtyNetworks.add(event.modifier().factionId());
+    }
+
+    private void onWarDeclared(WarDeclaredEvent event) {
+        notifyWar(event.war(), Component.literal("WAR DECLARED: "
+                + factions.factionName(event.war().attackerFactionId()) + " vs "
+                + factions.factionName(event.war().defenderFactionId())));
+    }
+
+    private void onWarStarted(WarStartedEvent event) {
+        long campSeconds = TerraFactionsConfig.WAR_CAMP_PLACEMENT_DEADLINE_TICKS.get() / 20L;
+        notifyWar(event.war(), Component.literal("War is now ACTIVE: "
+                + factions.factionName(event.war().attackerFactionId()) + " vs "
+                + factions.factionName(event.war().defenderFactionId())
+                + ". Offensive War Camps must be placed within " + campSeconds + " seconds."));
+    }
+
+    private void onWarEnded(WarEndedEvent event) {
+        notifyWar(event.war(), Component.literal("War ended. Goals — "
+                + factions.factionName(event.war().attackerFactionId()) + ": "
+                + sideResult(event.war().attacker()) + ", "
+                + factions.factionName(event.war().defenderFactionId()) + ": "
+                + sideResult(event.war().defender())));
+    }
+
+    private void onWarGoalCompleted(WarGoalCompletedEvent event) {
+        notifyWar(event.war(), Component.literal(factions.factionName(event.factionId())
+                + " completed its " + event.goalType().name() + " war goal."));
+    }
+
+    private void onWarCampDestroyed(WarCampDestroyedEvent event) {
+        notifyWar(event.war(), Component.literal(factions.factionName(event.warCamp().ownerFactionId())
+                + " lost its War Camp."));
+    }
+
+    private void onAnchorOccupied(AnchorOccupiedEvent event) {
+        notifyWar(event.war(), Component.literal(factions.factionName(event.occupation().occupyingFactionId())
+                + " occupied an enemy anchor."));
+    }
+
+    private void notifyWar(WarSnapshot war, Component message) {
+        notifyFaction(war.attackerFactionId(), message);
+        notifyFaction(war.defenderFactionId(), message);
+    }
+
+    private void notifyFaction(UUID factionId, Component message) {
+        if (server == null) return;
+        for (UUID memberId : factions.members(factionId)) {
+            ServerPlayer member = server.getPlayerList().getPlayer(memberId);
+            if (member != null) member.sendSystemMessage(message);
+        }
+    }
+
+    private static String sideResult(WarSideSnapshot side) {
+        String state = side.goalCompleted() ? "SUCCESS" : side.goalFailed() ? "FAILED" : "INCOMPLETE";
+        return side.warGoal() == null || side.warGoal().result().isBlank()
+                ? state : state + " (" + side.warGoal().result() + ")";
     }
 
     private void onRegisterCommands(RegisterCommandsEvent event) {
@@ -222,6 +346,10 @@ public final class TerritoryService {
         return factions;
     }
 
+    public WarManager wars() {
+        return wars;
+    }
+
     public boolean placeAnchor(ServerPlayer player, FactionAnchorBlockEntity anchor) {
         FactionIdentity identity = factions.factionForPlayer(player.getUUID());
         if (identity == null || !identity.rank().canBuild()) {
@@ -234,44 +362,205 @@ public final class TerritoryService {
             player.sendSystemMessage(Component.literal("Faction anchors must be placed inside your faction's territory."));
             return false;
         }
+        TerritoryKey capital = factions.capital(identity.id());
+        if (!factions.hasAnchor(identity.id())
+                && (capital == null || !key.equals(canonicalKey(capital)))) {
+            player.sendSystemMessage(Component.literal("Your faction's first anchor must be placed in its capital chunk."));
+            return false;
+        }
         anchor.assign(identity.id());
         configureAnchorProjection(anchor, 0);
         return true;
     }
 
     public void openAnchor(ServerPlayer player, FactionAnchorBlockEntity anchor) {
+        loadAnchor(anchor);
+        AnchorOccupationSnapshot occupation = wars.getOccupation(anchorId(anchor));
+        if (occupation != null) {
+            player.sendSystemMessage(Component.literal("This anchor is occupied by "
+                    + factions.factionName(occupation.occupyingFactionId()) + " during war "
+                    + occupation.warId().toString().substring(0, 8) + "."));
+            return;
+        }
+        FactionIdentity identity = factions.factionForPlayer(player.getUUID());
+        if (identity != null && anchor.factionId() != null && !anchor.factionId().equals(identity.id())) {
+            showEnemyAnchorCaptureStatus(player, anchor, identity);
+            return;
+        }
         if (!canConfigureAnchor(player, anchor)) return;
         loadAnchor(anchor);
         PacketDistributor.sendToPlayer(player, anchorState(anchor));
     }
 
+    private void progressPresenceCaptures(MinecraftServer minecraftServer) {
+        long now = minecraftServer.overworld().getGameTime();
+        Map<TerritoryKey, List<AnchorMapSnapshot>> anchorsByChunk = new HashMap<>();
+        for (AnchorMapSnapshot anchor : factions.allAnchors()) {
+            anchorsByChunk.computeIfAbsent(anchorKey(anchor), ignored -> new java.util.ArrayList<>()).add(anchor);
+        }
+        Map<CapturePresence, List<ServerPlayer>> participants = new HashMap<>();
+        for (ServerPlayer player : minecraftServer.getPlayerList().getPlayers()) {
+            FactionIdentity identity = factions.factionForPlayer(player.getUUID());
+            if (identity == null) continue;
+            for (AnchorMapSnapshot anchor : anchorsByChunk.getOrDefault(currentChunk(player), List.of())) {
+                AnchorOccupationSnapshot occupation = wars.getOccupation(anchor.id());
+                boolean attacking = !anchor.factionId().equals(identity.id());
+                boolean liberating = occupation != null
+                        && occupation.originalOwnerFactionId().equals(identity.id());
+                if (!attacking && !liberating) continue;
+                participants.computeIfAbsent(new CapturePresence(anchor.id(), identity.id()),
+                        ignored -> new java.util.ArrayList<>()).add(player);
+            }
+        }
+        Set<CapturePresence> activeBars = new HashSet<>();
+        for (Map.Entry<CapturePresence, List<ServerPlayer>> entry : participants.entrySet()) {
+            List<ServerPlayer> present = entry.getValue();
+            try {
+                AnchorSiegeResult result = wars.damageAnchorSiege(
+                        present.getFirst().getUUID(), entry.getKey().anchorId(), 1);
+                ServerBossEvent bossBar = captureBossBars.computeIfAbsent(entry.getKey(), ignored ->
+                        new ServerBossEvent(Component.literal("Capturing Anchor"),
+                                BossEvent.BossBarColor.RED, BossEvent.BossBarOverlay.NOTCHED_10));
+                syncCaptureBossBarPlayers(bossBar, present);
+                bossBar.setProgress(Math.max(0.0F, Math.min(1.0F,
+                        (float) result.progress() / Math.max(1, result.requiredProgress()))));
+                activeBars.add(entry.getKey());
+                if (result.completed()) {
+                    Component completed = captureCompleted(result);
+                    bossBar.setName(completed);
+                    bossBar.setColor(BossEvent.BossBarColor.GREEN);
+                    captureBossBarExpiry.put(entry.getKey(), now + 40L);
+                    for (ServerPlayer player : present) player.sendSystemMessage(completed);
+                } else {
+                    bossBar.setName(Component.literal("Capturing Anchor - " + result.progress()
+                            + "/" + result.requiredProgress()));
+                    bossBar.setColor(BossEvent.BossBarColor.RED);
+                    captureBossBarExpiry.remove(entry.getKey());
+                }
+            } catch (IllegalArgumentException | IllegalStateException ignored) {
+                // Merely standing in a non-eligible anchor chunk should not produce repeated chat spam.
+            }
+        }
+        for (CapturePresence key : new HashSet<>(captureBossBars.keySet())) {
+            if (activeBars.contains(key)) continue;
+            Long expiry = captureBossBarExpiry.get(key);
+            if (expiry != null && now < expiry) continue;
+            captureBossBars.remove(key).removeAllPlayers();
+            captureBossBarExpiry.remove(key);
+        }
+    }
+
+    private void syncCaptureBossBarPlayers(ServerBossEvent bossBar, List<ServerPlayer> present) {
+        Set<ServerPlayer> desired = present.stream()
+                .filter(player -> !hiddenHudPlayers.contains(player.getUUID()))
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        for (ServerPlayer current : List.copyOf(bossBar.getPlayers())) {
+            if (!desired.contains(current)) bossBar.removePlayer(current);
+        }
+        for (ServerPlayer player : desired) {
+            if (!bossBar.getPlayers().contains(player)) bossBar.addPlayer(player);
+        }
+    }
+
+    public void setHudVisible(ServerPlayer player, boolean visible) {
+        if (visible) hiddenHudPlayers.remove(player.getUUID());
+        else {
+            hiddenHudPlayers.add(player.getUUID());
+            captureBossBars.values().forEach(bossBar -> bossBar.removePlayer(player));
+        }
+    }
+
+    private void showEnemyAnchorCaptureStatus(ServerPlayer player, FactionAnchorBlockEntity anchor,
+                                              FactionIdentity identity) {
+        WarSnapshot war = wars.getWarBetweenFactions(identity.id(), anchor.factionId());
+        if (war == null || war.state() != WarState.ACTIVE) {
+            player.displayClientMessage(Component.literal("Enemy anchor - no active war permits its capture."), true);
+            return;
+        }
+        String id = anchorId(anchor);
+        AnchorSiegeSnapshot siege = wars.getSiege(id);
+        if (siege != null && siege.attackingFactionId().equals(identity.id())) {
+            player.displayClientMessage(Component.literal(
+                    "CAPTURE ACTIVE - remain in this chunk; progress is shown in the boss bar."), true);
+            return;
+        }
+        try {
+            if (wars.isAnchorAttackEligible(war.id(), identity.id(), id)) {
+                player.displayClientMessage(Component.literal(
+                        "CAPTURE READY - remain anywhere in this chunk to progress."), true);
+            } else {
+                player.displayClientMessage(Component.literal(
+                        "NOT CONNECTED - extend the invasion frontline to this anchor first."), true);
+            }
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            player.displayClientMessage(Component.literal("CANNOT CAPTURE - " + exception.getMessage()), true);
+        }
+    }
+
+    private static Component captureCompleted(AnchorSiegeResult result) {
+        return Component.literal(result.liberated()
+                ? "Faction anchor liberated."
+                : result.annexed() ? "Conquest complete. Faction anchor permanently annexed."
+                : "Faction anchor occupied. The permanent owner has not changed.");
+    }
+
+    private record CapturePresence(String anchorId, UUID factionId) {
+    }
+
+    boolean isOccupiedAnchor(net.minecraft.world.level.LevelAccessor level, BlockPos pos) {
+        return level.getBlockEntity(pos) instanceof FactionAnchorBlockEntity anchor
+                && wars.isReady() && wars.getOccupation(anchorId(anchor)) != null;
+    }
+
+    boolean isLastCapitalAnchor(net.minecraft.world.level.LevelAccessor level, BlockPos pos, UUID playerId) {
+        if (!(level instanceof net.minecraft.world.level.Level actualLevel)
+                || !(level.getBlockEntity(pos) instanceof FactionAnchorBlockEntity anchor)
+                || anchor.factionId() == null) return false;
+        FactionIdentity identity = factions.factionForPlayer(playerId);
+        UUID owner = anchor.factionId();
+        if (identity == null || !owner.equals(identity.id())) return false;
+        TerritoryKey storedCapital = factions.capital(owner);
+        TerritoryKey capital = storedCapital == null ? null : canonicalKey(storedCapital);
+        TerritoryKey target = canonicalKey(new TerritoryKey(actualLevel.dimension().location().toString(),
+                pos.getX() >> 4, pos.getZ() >> 4));
+        if (!target.equals(capital)) return false;
+        return factions.allAnchors().stream()
+                .filter(existing -> existing.factionId().equals(owner))
+                .filter(existing -> anchorKey(existing).equals(capital))
+                .count() <= 1L;
+    }
+
     public void loadAnchor(FactionAnchorBlockEntity anchor) {
         if (!factions.isReady() || anchor.factionId() == null) return;
-        if (factions.anchor(anchorId(anchor)) == null) {
+        AnchorMapSnapshot persisted = factions.anchor(anchorId(anchor));
+        if (persisted == null) {
             configureAnchorProjection(anchor, anchor.allocatedPower());
+        } else if (!persisted.factionId().equals(anchor.factionId())) {
+            anchor.assign(persisted.factionId());
         }
     }
 
     public void setAnchorPower(ServerPlayer player, AnchorPowerPayload payload) {
-        if (!(player.level().getBlockEntity(payload.pos()) instanceof FactionAnchorBlockEntity anchor)
-                || !canConfigureAnchor(player, anchor)) {
+        if (!(player.level().getBlockEntity(payload.pos()) instanceof FactionAnchorBlockEntity anchor)) {
             return;
         }
+        loadAnchor(anchor);
+        if (!canConfigureAnchor(player, anchor)) return;
         int maximum = maximumAnchorPower(anchor.factionId());
         if (payload.power() < 0 || payload.power() > maximum) {
             player.sendSystemMessage(Component.literal("Dedicated power must be between 0 and " + maximum + "."));
         } else {
             configureAnchorProjection(anchor, payload.power());
-            reconcileAnchorBorders(anchor.factionId());
-            recalculateFactionNetwork(anchor.factionId(), server.overworld().getGameTime());
-            dirtyNetworks.remove(anchor.factionId());
+            processDirtyNetworks(server);
+            wars.reconcileInvasionNetworks();
         }
         PacketDistributor.sendToPlayer(player, anchorState(anchor));
     }
 
     public void requestAnchorState(ServerPlayer player, AnchorStateRequestPayload payload) {
-        if (player.level().getBlockEntity(payload.pos()) instanceof FactionAnchorBlockEntity anchor
-                && canConfigureAnchor(player, anchor)) {
+        if (player.level().getBlockEntity(payload.pos()) instanceof FactionAnchorBlockEntity anchor) {
+            loadAnchor(anchor);
+            if (!canConfigureAnchor(player, anchor)) return;
             PacketDistributor.sendToPlayer(player, anchorState(anchor));
         }
     }
@@ -279,8 +568,11 @@ public final class TerritoryService {
     public void removeAnchor(FactionAnchorBlockEntity anchor) {
         UUID owner = anchor.factionId();
         if (owner == null || !factions.isReady()) return;
+        loadAnchor(anchor);
+        owner = anchor.factionId();
         String id = anchorId(anchor);
         anchor.updateProjection(anchor.allocatedPower());
+        wars.handleAnchorRemoved(id);
         factions.removeAnchor(id);
         dirtyNetworks.add(owner);
         ensureCapital(owner);
@@ -288,11 +580,17 @@ public final class TerritoryService {
 
     private boolean canConfigureAnchor(ServerPlayer player, FactionAnchorBlockEntity anchor) {
         if (anchor.getLevel() != player.level()
-                || player.distanceToSqr(anchor.getBlockPos().getX() + 0.5D,
-                anchor.getBlockPos().getY() + 0.5D, anchor.getBlockPos().getZ() + 0.5D) > 64.0D) {
+                || ToroidalTerritoryCompat.blockDistanceSquared(server,
+                player.level().dimension().location().toString(), player.position(),
+                net.minecraft.world.phys.Vec3.atCenterOf(anchor.getBlockPos())) > 64.0D) {
             return false;
         }
         FactionIdentity identity = factions.factionForPlayer(player.getUUID());
+        AnchorOccupationSnapshot occupation = wars.getOccupation(anchorId(anchor));
+        if (occupation != null) {
+            player.sendSystemMessage(Component.literal("This anchor is occupied and cannot be configured."));
+            return false;
+        }
         if (identity == null || anchor.factionId() == null || !anchor.factionId().equals(identity.id())
                 || !identity.rank().canBuild()) {
             player.sendSystemMessage(Component.literal("You cannot configure this faction anchor."));
@@ -308,7 +606,8 @@ public final class TerritoryService {
         int costTenths = anchor.tier().powerTenthsPerClaim();
         TerritoryKey anchorChunk = anchorKey(anchor);
         int maxClaims = (int) Math.min(Integer.MAX_VALUE, allocatedPower * 10L / costTenths);
-        TerritoryRules.CircularProjection projection = TerritoryRules.largestCircularProjection(anchorChunk, maxClaims);
+        TerritoryRules.CircularProjection projection = TerritoryRules.largestCircularProjection(
+                anchorChunk, maxClaims, this::canonicalKey);
         Set<TerritoryKey> desired = projection.claims();
         anchor.updateProjection(allocatedPower);
         AnchorMapSnapshot old = factions.anchor(id);
@@ -348,34 +647,32 @@ public final class TerritoryService {
                 isolationSecondsRemaining(state));
     }
 
-    private static TerritoryKey anchorKey(FactionAnchorBlockEntity anchor) {
+    private TerritoryKey anchorKey(FactionAnchorBlockEntity anchor) {
         ChunkPos chunk = new ChunkPos(anchor.getBlockPos());
-        return TerritoryKey.of(anchor.getLevel().dimension().location(), chunk.x, chunk.z);
+        return canonicalKey(TerritoryKey.of(anchor.getLevel().dimension().location(), chunk.x, chunk.z));
     }
 
-    private static TerritoryKey anchorKey(AnchorMapSnapshot anchor) {
-        return new TerritoryKey(anchor.dimension(), Math.floorDiv(anchor.x(), 16), Math.floorDiv(anchor.z(), 16));
+    private TerritoryKey anchorKey(AnchorMapSnapshot anchor) {
+        return canonicalKey(new TerritoryKey(anchor.dimension(), Math.floorDiv(anchor.x(), 16),
+                Math.floorDiv(anchor.z(), 16)));
     }
 
     private void processDirtyNetworks(MinecraftServer minecraftServer) {
         if (dirtyNetworks.isEmpty()) return;
-        Set<UUID> pending = new HashSet<>(dirtyNetworks);
-        dirtyNetworks.removeAll(pending);
+        dirtyNetworks.clear();
         long now = minecraftServer.overworld().getGameTime();
-        for (UUID factionId : pending) {
-            reconcileAnchorBorders(factionId);
-            recalculateFactionNetwork(factionId, now);
-        }
+        reconcileAnchorBorders();
+        for (FactionSnapshot faction : factions.allFactions()) recalculateFactionNetwork(faction.id(), now);
     }
 
-    private void reconcileAnchorBorders(UUID factionId) {
-        List<AnchorMapSnapshot> anchors = factions.allAnchors().stream()
-                .filter(anchor -> anchor.factionId().equals(factionId)).toList();
-        Map<String, Set<TerritoryKey>> desiredByDimension = new HashMap<>();
+    private void reconcileAnchorBorders() {
+        List<AnchorMapSnapshot> anchors = List.copyOf(factions.allAnchors());
+        List<TerritoryRules.BorderInfluence> influences = new java.util.ArrayList<>();
         for (AnchorMapSnapshot anchor : anchors) {
             TerritoryRules.CircularProjection projection = projectionFor(anchor);
-            desiredByDimension.computeIfAbsent(anchor.dimension(), ignored -> new HashSet<>())
-                    .addAll(projection.claims());
+            long strength = effectiveBorderStrength(anchor);
+            influences.add(new TerritoryRules.BorderInfluence(anchor.id(), anchor.factionId(),
+                    anchorKey(anchor), projection.radius(), strength, projection.claims()));
             if (anchor.projectedRadius() != projection.radius()
                     || anchor.projectedClaims() != projection.claims().size()) {
                 factions.putAnchor(new AnchorMapSnapshot(anchor.id(), anchor.factionId(), anchor.dimension(),
@@ -386,18 +683,19 @@ public final class TerritoryService {
             }
         }
 
-        for (TerritoryClaim claim : allTerritory().stream()
-                .filter(value -> value.factionId().equals(factionId) && value.projected()).toList()) {
-            if (!desiredByDimension.getOrDefault(claim.key().dimension(), Set.of()).contains(claim.key())) {
-                factions.removeClaim(claim.key());
+        Map<TerritoryKey, TerritoryRules.BorderInfluence> winners = TerritoryRules.resolveBorderInfluence(
+                influences, this::distanceSquared);
+        for (TerritoryClaim claim : allTerritory().stream().filter(TerritoryClaim::projected).toList()) {
+            TerritoryRules.BorderInfluence winner = winners.get(claim.key());
+            if (winner == null) factions.removeClaim(claim.key());
+            else if (!winner.factionId().equals(claim.factionId())) {
+                factions.putProjectedClaim(claim.key(), winner.factionId());
             }
         }
-        for (Set<TerritoryKey> desired : desiredByDimension.values()) {
-            for (TerritoryKey key : desired) {
-                if (claimAt(key) == null) {
-                    // Physical border claims belong to the faction-wide union, not to an individual anchor.
-                    factions.putProjectedClaim(key, factionId);
-                }
+        for (Map.Entry<TerritoryKey, TerritoryRules.BorderInfluence> entry : winners.entrySet()) {
+            if (claimAt(entry.getKey()) == null) {
+                // Manual core/capital claims remain fixed; only projected border claims are contested.
+                factions.putProjectedClaim(entry.getKey(), entry.getValue().factionId());
             }
         }
     }
@@ -473,24 +771,30 @@ public final class TerritoryService {
         }
     }
 
-    private static TerritoryRules.CircularProjection projectionFor(AnchorMapSnapshot anchor) {
-        int maxClaims = (int) Math.min(Integer.MAX_VALUE,
-                anchor.allocatedPower() * 10L / anchor.tier().powerTenthsPerClaim());
-        return TerritoryRules.largestCircularProjection(anchorKey(anchor), maxClaims);
+    private TerritoryRules.CircularProjection projectionFor(AnchorMapSnapshot anchor) {
+        int maxClaims = (int) Math.min(Integer.MAX_VALUE, effectiveBorderStrength(anchor));
+        return TerritoryRules.largestCircularProjection(anchorKey(anchor), maxClaims, this::canonicalKey);
+    }
+
+    private static long effectiveBorderStrength(AnchorMapSnapshot anchor) {
+        return Math.max(0L, anchor.allocatedPower() * 10L / anchor.tier().powerTenthsPerClaim());
     }
 
     private Set<String> connectedAnchors(UUID factionId, Map<TerritoryKey, TerritoryClaim> claims,
                                          List<AnchorMapSnapshot> anchors) {
-        TerritoryKey capital = factions.capital(factionId);
+        TerritoryKey storedCapital = factions.capital(factionId);
+        TerritoryKey capital = storedCapital == null ? null : canonicalKey(storedCapital);
         if (capital == null || !claims.containsKey(capital)) return Set.of();
-        Set<TerritoryKey> reachable = TerritoryRules.connectedComponent(claims.keySet(), capital);
+        Set<TerritoryKey> reachable = TerritoryRules.connectedComponent(
+                claims.keySet(), capital, this::canonicalKey);
         Set<String> capitalAnchors = anchors.stream()
                 .filter(anchor -> anchorKey(anchor).equals(capital))
                 .map(AnchorMapSnapshot::id).collect(java.util.stream.Collectors.toSet());
         Set<String> territoriallyReachable = anchors.stream()
                 .filter(anchor -> reachable.contains(anchorKey(anchor)))
                 .map(AnchorMapSnapshot::id).collect(java.util.stream.Collectors.toSet());
-        return AnchorNetworkRules.connectedToCapital(anchors, capitalAnchors, territoriallyReachable);
+        return AnchorNetworkRules.connectedToCapital(anchors, capitalAnchors, territoriallyReachable,
+                (first, second) -> distanceSquared(anchorKey(first), anchorKey(second)));
     }
 
     private long corePowerUsageTenths(UUID factionId) {
@@ -514,28 +818,117 @@ public final class TerritoryService {
                 case UNCLAIM -> unclaim(source);
                 case SET_CAPITAL -> setCapital(source);
                 case SET_OVERLAY -> setOverlay(source, payload.enabled());
+                case SET_PROTECTION -> setFactionProtection(player, payload);
+                case DECLARE_WAR, CHOOSE_WAR_GOAL, ADD_WAR_TARGET, REMOVE_WAR_TARGET,
+                     SELECT_WAR_CAMP -> handleWarUiAction(player, payload);
                 default -> factionCommands.handleUiAction(player, payload);
             }
         } catch (com.mojang.brigadier.exceptions.CommandSyntaxException exception) {
             source.sendFailure(Component.literal(exception.getMessage()));
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            player.sendSystemMessage(Component.literal(exception.getMessage()));
         }
         factions.allFactions().forEach(faction -> dirtyNetworks.add(faction.id()));
         syncClientState(player, true);
+    }
+
+    private void setFactionProtection(ServerPlayer player, FactionActionPayload payload) {
+        FactionIdentity actor = factions.factionForPlayer(player.getUUID());
+        if (actor == null || !actor.rank().isLeadership()) {
+            throw new IllegalStateException("Only faction leadership can configure territory protections");
+        }
+        ProtectionAction action = ProtectionAction.valueOf(payload.primary().toUpperCase(Locale.ROOT));
+        TerritoryType territoryType = TerritoryType.valueOf(payload.secondary().toUpperCase(Locale.ROOT));
+        if (territoryType == TerritoryType.CAPITAL) territoryType = TerritoryType.CORE;
+        factions.setProtection(actor.id(), territoryType, action, payload.enabled());
+        player.sendSystemMessage(Component.literal((territoryType == TerritoryType.CORE ? "Core " : "Border ")
+                + action.name().toLowerCase(Locale.ROOT).replace('_', ' ') + " protection "
+                + (payload.enabled() ? "enabled." : "disabled.")));
+    }
+
+    private void handleWarUiAction(ServerPlayer player, FactionActionPayload payload) {
+        FactionIdentity actor = factions.factionForPlayer(player.getUUID());
+        if (actor == null || !actor.rank().isLeadership()) {
+            throw new IllegalStateException("Only faction leadership can manage wars");
+        }
+        UUID opponentId = factions.factionByName(payload.primary().trim());
+        if (opponentId == null || opponentId.equals(actor.id())) {
+            throw new IllegalArgumentException("The selected opposing faction does not exist");
+        }
+
+        switch (payload.action()) {
+            case DECLARE_WAR -> {
+                WarGoalType goal = offensiveGoal(payload.secondary());
+                WarGoalSnapshot selected = goalWithInitialTarget(goal, payload.tertiary(), opponentId);
+                wars.declareWar(actor.id(), opponentId, selected);
+            }
+            case CHOOSE_WAR_GOAL -> {
+                WarSnapshot war = requireWarWith(actor.id(), opponentId);
+                WarGoalType goal = parseWarGoal(payload.secondary());
+                WarGoalSnapshot selected = goalWithInitialTarget(goal, payload.tertiary(), opponentId);
+                wars.chooseDefenderGoal(war.id(), actor.id(), selected);
+            }
+            case ADD_WAR_TARGET, REMOVE_WAR_TARGET -> {
+                WarSnapshot war = requireWarWith(actor.id(), opponentId);
+                if (payload.tertiary().isBlank()) throw new IllegalArgumentException("Select an anchor target");
+                if (payload.action() == FactionActionPayload.Action.ADD_WAR_TARGET) {
+                    wars.addWarGoalTarget(war.id(), actor.id(), payload.tertiary());
+                } else {
+                    wars.removeWarGoalTarget(war.id(), actor.id(), payload.tertiary());
+                }
+            }
+            case SELECT_WAR_CAMP -> {
+                WarSnapshot war = requireWarWith(actor.id(), opponentId);
+                wars.selectWarCampWar(player, actor.id(), war.id());
+                player.sendSystemMessage(Component.literal("The held War Camp is assigned against "
+                        + factions.factionName(opponentId) + "."));
+            }
+            default -> throw new IllegalArgumentException("Unsupported war action");
+        }
+    }
+
+    private WarSnapshot requireWarWith(UUID factionId, UUID opponentId) {
+        WarSnapshot war = wars.getWarBetweenFactions(factionId, opponentId);
+        if (war == null) throw new IllegalStateException("There is no unresolved war with that faction");
+        return war;
+    }
+
+    private WarGoalSnapshot goalWithInitialTarget(WarGoalType goal, String targetId, UUID opponentId) {
+        WarGoalSnapshot selected = WarGoalSnapshot.selected(goal);
+        if (goal != WarGoalType.CONQUEST && goal != WarGoalType.PLUNDER) return selected;
+        AnchorMapSnapshot anchor = targetId.isBlank() ? null : factions.anchor(targetId);
+        if (anchor == null || !anchor.factionId().equals(opponentId)) {
+            throw new IllegalArgumentException("Select one of the opposing faction's anchors first");
+        }
+        return selected.withTargets(Set.of(anchor.id()));
+    }
+
+    private static WarGoalType offensiveGoal(String name) {
+        WarGoalType goal = parseWarGoal(name);
+        if (!goal.requiresWarCamp()) throw new IllegalArgumentException("A declaration requires an offensive goal");
+        return goal;
+    }
+
+    private static WarGoalType parseWarGoal(String name) {
+        try {
+            return WarGoalType.valueOf(name.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("Invalid war goal");
+        }
     }
 
     /** Handles a chunk selected through JourneyMap, with all authority enforced server-side. */
     public void handleJourneyMapClaim(ServerPlayer player, JourneyMapClaimPayload payload) {
         CommandSourceStack source = player.createCommandSourceStack();
         TerritoryKey playerChunk = currentChunk(player);
-        TerritoryKey target = TerritoryKey.of(payload.dimension(), payload.chunkX(), payload.chunkZ());
+        TerritoryKey target = canonicalKey(
+                TerritoryKey.of(payload.dimension(), payload.chunkX(), payload.chunkZ()));
         int radius = TerraFactionsConfig.JOURNEYMAP_CLAIM_RADIUS.get();
         if (!target.dimension().equals(playerChunk.dimension())) {
             fail(source, "JourneyMap claims must be in your current dimension.");
             return;
         }
-        long deltaX = Math.abs((long) target.x() - playerChunk.x());
-        long deltaZ = Math.abs((long) target.z() - playerChunk.z());
-        if (Math.max(deltaX, deltaZ) > radius) {
+        if (ToroidalTerritoryCompat.chebyshevDistance(server, target, playerChunk) > radius) {
             fail(source, "That chunk is outside the JourneyMap claim radius of " + radius + " chunks.");
             return;
         }
@@ -553,7 +946,13 @@ public final class TerritoryService {
     }
 
     public TerritoryClaim claimAt(TerritoryKey key) {
-        return factions.isReady() ? factions.claim(key) : null;
+        return factions.isReady() ? factions.claim(canonicalKey(key)) : null;
+    }
+
+    public boolean hasActivePlunderAccess(ServerPlayer player, TerritoryClaim claim) {
+        if (claim == null || !wars.isReady()) return false;
+        FactionIdentity identity = factions.factionForPlayer(player.getUUID());
+        return identity != null && wars.hasActivePlunderAccess(identity.id(), claim.key());
     }
 
     private void onFactionMovement(ServerPlayer player) {
@@ -602,11 +1001,12 @@ public final class TerritoryService {
                 : List.of();
         if (identity == null) {
             return new FactionUiPayload("", "", "", 0xAAAAAA, -1,
-                    0, 0, 0, 0, 0, TerraFactionsConfig.BASE_POWER.get(),
+                    0, 0, 0, 0, 0, 0, 0, 0.0D, TerraFactionsConfig.BASE_POWER.get(),
                     TerraFactionsConfig.POWER_PER_MEMBER.get(), TerraFactionsConfig.CORE_CLAIM_COST.get(),
                     TerraFactionsConfig.BORDER_CLAIM_COST.get(), 0, 0, 0, 0, 0, "", false, false,
+                    0, 0, 0, 0,
                     factions.radarEnabled(player.getUUID()), factions.chatMode(player.getUUID()).ordinal(),
-                    List.of(), List.of(), factionEntries, adminFactionEntries);
+                    List.of(), List.of(), factionEntries, List.of(), List.of(), adminFactionEntries);
         }
 
         FactionSnapshot faction = factions.snapshot(identity.id());
@@ -644,16 +1044,73 @@ public final class TerritoryService {
         int projectedClaimUsage = Math.max(0, power.claimUsage() - manualClaimUsage);
         String capital = faction.capital() == null ? "" : faction.capital().x() + ", " + faction.capital().z()
                 + " (" + faction.capital().dimension() + ")";
+        List<FactionUiPayload.WarEntry> warEntries = createWarEntries(identity.id());
+        List<FactionUiPayload.WarTargetEntry> warTargets = identity.rank().isLeadership()
+                ? createWarTargets(identity.id()) : List.of();
         return new FactionUiPayload(faction.name(), faction.description(), factions.tag(identity.id()),
                 faction.color(), identity.rank().ordinal(), power.current(), power.maximum(), power.claimUsage(),
-                power.deathLoss(), power.specialPower(), TerraFactionsConfig.BASE_POWER.get(),
+                power.deathLoss(), power.specialPower(), power.temporaryPower(), power.suppressedPower(),
+                power.suppressionPercent(), TerraFactionsConfig.BASE_POWER.get(),
                 TerraFactionsConfig.POWER_PER_MEMBER.get(),
                 TerraFactionsConfig.CORE_CLAIM_COST.get(), TerraFactionsConfig.BORDER_CLAIM_COST.get(),
                 capitalClaims, coreClaims, borderClaims, projectedBorderClaims, projectedClaimUsage, capital,
                 isVulnerable(identity.id(), TerritoryType.CORE),
                 isVulnerable(identity.id(), TerritoryType.BORDER),
+                factions.effectiveProtectionMask(identity.id(), TerritoryType.CORE),
+                factions.effectiveProtectionMask(identity.id(), TerritoryType.BORDER),
+                factions.configurableProtectionMask(TerritoryType.CORE),
+                factions.configurableProtectionMask(TerritoryType.BORDER),
                 factions.radarEnabled(player.getUUID()), factions.chatMode(player.getUUID()).ordinal(),
-                members, losses, factionEntries, adminFactionEntries);
+                members, losses, factionEntries, warEntries, warTargets, adminFactionEntries);
+    }
+
+    private List<FactionUiPayload.WarEntry> createWarEntries(UUID factionId) {
+        return wars.getWarsForFaction(factionId).stream()
+                .filter(war -> war.state() != WarState.ENDED)
+                .map(war -> {
+                    boolean attacker = war.attackerFactionId().equals(factionId);
+                    UUID opponentId = attacker ? war.defenderFactionId() : war.attackerFactionId();
+                    FactionSnapshot opponent = factions.snapshot(opponentId);
+                    WarSideSnapshot own = war.side(factionId);
+                    WarSideSnapshot enemy = war.side(opponentId);
+                    WarCampSnapshot camp = own.warCampId() == null ? null : wars.getWarCamp(own.warCampId());
+                    int ownGoal = own.warGoal() == null ? -1 : own.warGoal().type().ordinal();
+                    int enemyGoal = enemy.warGoal() == null ? -1 : enemy.warGoal().type().ordinal();
+                    int progress = own.warGoal() == null ? 0 : own.warGoal().progress();
+                    int required = own.warGoal() == null ? 0 : own.warGoal().requiredObjectiveValue();
+                    List<String> targets = own.warGoal() == null ? List.of()
+                            : own.warGoal().targetAnchorIds().stream().sorted().limit(4096).toList();
+                    return new FactionUiPayload.WarEntry(war.id().toString(),
+                            opponent == null ? opponentId.toString() : opponent.name(),
+                            opponent == null ? 0xAAAAAA : opponent.color(), war.state().ordinal(), attacker,
+                            ownGoal, enemyGoal, progress, required, own.goalCompleted(), own.goalFailed(),
+                            camp == null ? -1 : camp.state().ordinal(),
+                            wars.getOccupations(war.id(), factionId).size(), war.preparationEndsAt(), targets);
+                }).toList();
+    }
+
+    private List<FactionUiPayload.WarTargetEntry> createWarTargets(UUID factionId) {
+        long now = server == null ? 0L : server.overworld().getGameTime();
+        Set<String> occupiedAnchors = wars.allOccupations().stream()
+                .filter(occupation -> occupation.occupyingFactionId().equals(factionId))
+                .map(AnchorOccupationSnapshot::anchorId).collect(java.util.stream.Collectors.toSet());
+        Set<String> breachedAnchors = wars.allPlunderBreaches().stream()
+                .filter(breach -> breach.breachingFactionId().equals(factionId) && breach.active(now))
+                .map(dev.terrafactions.war.PlunderBreachSnapshot::anchorId)
+                .collect(java.util.stream.Collectors.toSet());
+        return factions.allAnchors().stream()
+                .filter(anchor -> !anchor.factionId().equals(factionId))
+                .map(anchor -> {
+                    return new FactionUiPayload.WarTargetEntry(anchor.id(),
+                            java.util.Objects.requireNonNullElse(factions.factionName(anchor.factionId()), "Unknown"),
+                            anchor.dimension(),
+                            anchor.x(), anchor.y(), anchor.z(), anchor.tier().ordinal(),
+                            anchor.allocatedPower(), occupiedAnchors.contains(anchor.id()),
+                            breachedAnchors.contains(anchor.id()));
+                }).sorted(Comparator.comparing(FactionUiPayload.WarTargetEntry::factionName,
+                        String.CASE_INSENSITIVE_ORDER).thenComparing(FactionUiPayload.WarTargetEntry::anchorId))
+                .limit(4096)
+                .toList();
     }
 
     private static String playerName(MinecraftServer server, UUID playerId) {
@@ -694,12 +1151,39 @@ public final class TerritoryService {
             }
         }
 
+        WarSnapshot hudWar = viewer == null ? null : preferredHudWar(viewer.id());
+        WarSideSnapshot ownWarSide = hudWar == null ? null : hudWar.side(viewer.id());
+        UUID warOpponentId = hudWar == null ? null : hudWar.attackerFactionId().equals(viewer.id())
+                ? hudWar.defenderFactionId() : hudWar.attackerFactionId();
+        WarSideSnapshot enemyWarSide = hudWar == null ? null : hudWar.side(warOpponentId);
+        WarCampSnapshot warCamp = ownWarSide == null || ownWarSide.warCampId() == null ? null
+                : wars.getWarCamp(ownWarSide.warCampId());
         return new TerritoryRadarPayload(territoryName, territoryFaction, relationColor, vulnerable, isolated,
                 ownPower != null,
                 viewer == null ? -1 : viewer.rank().ordinal(),
                 ownPower == null ? 0 : ownPower.current(),
                 ownPower == null ? 0 : ownPower.maximum(),
-                borderVulnerable, coreVulnerable);
+                borderVulnerable, coreVulnerable,
+                warOpponentId == null ? "" : factions.factionName(warOpponentId),
+                hudWar == null ? -1 : hudWar.state().ordinal(),
+                ownWarSide == null || ownWarSide.warGoal() == null ? -1 : ownWarSide.warGoal().type().ordinal(),
+                enemyWarSide == null || enemyWarSide.warGoal() == null ? -1 : enemyWarSide.warGoal().type().ordinal(),
+                ownWarSide == null || ownWarSide.warGoal() == null ? 0 : ownWarSide.warGoal().progress(),
+                ownWarSide == null || ownWarSide.warGoal() == null ? 0
+                        : ownWarSide.warGoal().requiredObjectiveValue(),
+                ownWarSide != null && ownWarSide.goalCompleted(), ownWarSide != null && ownWarSide.goalFailed(),
+                warCamp == null ? -1 : warCamp.state().ordinal());
+    }
+
+    private WarSnapshot preferredHudWar(UUID factionId) {
+        return wars.getWarsForFaction(factionId).stream()
+                .filter(war -> war.state() != WarState.ENDED)
+                .min(Comparator.comparingInt(war -> switch (war.state()) {
+                    case ACTIVE -> 0;
+                    case PREPARING -> 1;
+                    case RESOLVING -> 2;
+                    case ENDED -> 3;
+                })).orElse(null);
     }
 
     private int relationColor(FactionIdentity viewer, UUID territoryFactionId) {
@@ -725,6 +1209,7 @@ public final class TerritoryService {
     }
 
     private int claim(CommandSourceStack source, Actor actor, TerritoryType type, TerritoryKey key) {
+        key = canonicalKey(key);
         if (type == TerritoryType.BORDER) {
             return fail(source, "Border territory can only be projected by faction anchors.");
         }
@@ -743,7 +1228,7 @@ public final class TerritoryService {
 
         Set<TerritoryKey> territory = territory(actor.factionId(), key.dimension());
         if (existing == null && TerraFactionsConfig.REQUIRE_SIDE_CONNECTIVITY.get()
-                && !territory.isEmpty() && !TerritoryRules.touches(territory, key)) {
+                && !territory.isEmpty() && !TerritoryRules.touches(territory, key, this::canonicalKey)) {
             return fail(source, "New territory must share a side with your faction's existing territory.");
         }
         if (!hasCapacity(actor.factionId(), resultType, existing)) {
@@ -762,6 +1247,7 @@ public final class TerritoryService {
     }
 
     private int unclaim(CommandSourceStack source, Actor actor, TerritoryKey key) {
+        key = canonicalKey(key);
         TerritoryClaim existing = claimAt(key);
         if (existing == null || !existing.factionId().equals(actor.factionId())) {
             return fail(source, "Your faction does not own this chunk.");
@@ -773,7 +1259,8 @@ public final class TerritoryService {
             return fail(source, "Move your capital before unclaiming this chunk.");
         }
         Set<TerritoryKey> territory = territory(actor.factionId(), key.dimension());
-        if (TerraFactionsConfig.REQUIRE_SIDE_CONNECTIVITY.get() && !TerritoryRules.remainsConnected(territory, key)) {
+        if (TerraFactionsConfig.REQUIRE_SIDE_CONNECTIVITY.get()
+                && !TerritoryRules.remainsConnected(territory, key, this::canonicalKey)) {
             return fail(source, "Unclaiming this chunk would split your faction's territory.");
         }
         remove(existing);
@@ -800,7 +1287,7 @@ public final class TerritoryService {
         }
         Actor actor = actor(source);
         TerritoryKey center = currentChunk(actor.player());
-        Set<TerritoryKey> square = TerritoryRules.centeredSquare(center, radius);
+        Set<TerritoryKey> square = TerritoryRules.centeredSquare(center, radius, this::canonicalKey);
         Set<TerritoryKey> ownedInDimension = territory(actor.factionId(), center.dimension());
         List<TerritoryKey> additions = square.stream().filter(key -> !ownedInDimension.contains(key)).toList();
         for (TerritoryKey key : additions) {
@@ -814,7 +1301,8 @@ public final class TerritoryService {
         }
         Set<TerritoryKey> resulting = new HashSet<>(ownedInDimension);
         resulting.addAll(additions);
-        if (TerraFactionsConfig.REQUIRE_SIDE_CONNECTIVITY.get() && !TerritoryRules.isConnected(resulting)) {
+        if (TerraFactionsConfig.REQUIRE_SIDE_CONNECTIVITY.get()
+                && !TerritoryRules.isConnected(resulting, this::canonicalKey)) {
             return fail(source, "The bulk claim must connect to your faction's existing territory.");
         }
 
@@ -858,6 +1346,7 @@ public final class TerritoryService {
     }
 
     private int captureEnemyClaim(CommandSourceStack source, Actor actor, TerritoryType resultType, TerritoryKey key) {
+        key = canonicalKey(key);
         TerritoryClaim target = claimAt(key);
         if (target == null || target.factionId().equals(actor.factionId())) {
             return fail(source, "Stand inside vulnerable enemy territory to claim it.");
@@ -868,7 +1357,7 @@ public final class TerritoryService {
         if (!isVulnerable(target)) {
             return fail(source, "This " + target.type().name().toLowerCase() + " claim is not vulnerable.");
         }
-        if (!TerritoryRules.touches(territory(actor.factionId(), key.dimension()), key)) {
+        if (!TerritoryRules.touches(territory(actor.factionId(), key.dimension()), key, this::canonicalKey)) {
             return fail(source, "A captured claim must share a side with your faction's territory.");
         }
         if (!hasCapacity(actor.factionId(), resultType, null)) {
@@ -887,6 +1376,7 @@ public final class TerritoryService {
     }
 
     private int liberate(CommandSourceStack source, Actor actor, TerritoryKey key) {
+        key = canonicalKey(key);
         TerritoryClaim target = claimAt(key);
         if (target == null || target.factionId().equals(actor.factionId())) {
             return fail(source, "Stand inside vulnerable enemy territory to liberate it.");
@@ -918,6 +1408,9 @@ public final class TerritoryService {
         if (claim.type() == TerritoryType.CAPITAL) {
             return fail(source, "This chunk is already your faction capital.");
         }
+        boolean anchored = factions.allAnchors().stream().anyMatch(anchor ->
+                anchor.factionId().equals(actor.factionId()) && anchorKey(anchor).equals(key));
+        if (!anchored) return fail(source, "The capital can only be moved to a chunk containing your faction anchor.");
         TerritoryKey oldKey = factions.capital(actor.factionId());
         TerritoryClaim oldClaim = oldKey == null ? null : claimAt(oldKey);
         if (oldClaim != null && oldClaim.factionId().equals(actor.factionId())) {
@@ -964,11 +1457,9 @@ public final class TerritoryService {
                 ? AnchorVulnerabilityState.VULNERABLE : AnchorVulnerabilityState.PROTECTED;
     }
 
-    private static boolean covers(AnchorMapSnapshot anchor, TerritoryKey key) {
+    private boolean covers(AnchorMapSnapshot anchor, TerritoryKey key) {
         TerritoryKey center = anchorKey(anchor);
-        long dx = (long) center.x() - key.x();
-        long dz = (long) center.z() - key.z();
-        return dx * dx + dz * dz <= (long) anchor.projectedRadius() * anchor.projectedRadius();
+        return distanceSquared(center, key) <= (long) anchor.projectedRadius() * anchor.projectedRadius();
     }
 
     public boolean isVulnerable(UUID factionId, TerritoryType type) {
@@ -1064,6 +1555,7 @@ public final class TerritoryService {
     }
 
     private void replace(TerritoryClaim oldClaim, UUID newOwner, TerritoryType newType, TerritoryKey key) {
+        key = canonicalKey(key);
         if (oldClaim != null) {
             remove(oldClaim);
         }
@@ -1088,7 +1580,7 @@ public final class TerritoryService {
     }
 
     private void add(UUID owner, TerritoryType type, TerritoryKey key) {
-        factions.putClaim(key, owner, type);
+        factions.putClaim(canonicalKey(key), owner, type);
         corePowerUsageCache.remove(owner);
         dirtyNetworks.add(owner);
     }
@@ -1111,9 +1603,17 @@ public final class TerritoryService {
         return new Actor(player, identity.id(), identity.rank());
     }
 
-    private static TerritoryKey currentChunk(ServerPlayer player) {
+    private TerritoryKey currentChunk(ServerPlayer player) {
         ChunkPos chunk = player.chunkPosition();
-        return TerritoryKey.of(player.level().dimension().location(), chunk.x, chunk.z);
+        return canonicalKey(TerritoryKey.of(player.level().dimension().location(), chunk.x, chunk.z));
+    }
+
+    private TerritoryKey canonicalKey(TerritoryKey key) {
+        return ToroidalTerritoryCompat.fold(server, key);
+    }
+
+    private long distanceSquared(TerritoryKey first, TerritoryKey second) {
+        return ToroidalTerritoryCompat.distanceSquared(server, first, second);
     }
 
     private static int success(CommandSourceStack source, String message) {

@@ -44,6 +44,7 @@ public final class TerraFactions {
             event.accept(TerraFactionsBlocks.FACTION_ANCHOR_ITEM.get());
             event.accept(TerraFactionsBlocks.ADVANCED_FACTION_ANCHOR_ITEM.get());
             event.accept(TerraFactionsBlocks.MASTER_FACTION_ANCHOR_ITEM.get());
+            event.accept(TerraFactionsBlocks.WAR_CAMP_ITEM.get());
         }
     }
 }

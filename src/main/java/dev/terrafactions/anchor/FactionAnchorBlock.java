@@ -53,11 +53,19 @@ public final class FactionAnchorBlock extends BaseEntityBlock {
     public void setPlacedBy(Level level, BlockPos pos, BlockState state, @Nullable LivingEntity placer,
                             ItemStack stack) {
         super.setPlacedBy(level, pos, state, placer, stack);
-        if (!level.isClientSide && placer instanceof ServerPlayer player
-                && level.getBlockEntity(pos) instanceof FactionAnchorBlockEntity anchor
-                && !TerraFactions.territories().placeAnchor(player, anchor)) {
-            level.destroyBlock(pos, true);
+        if (level.isClientSide) return;
+        if (placer instanceof ServerPlayer player
+                && level.getBlockEntity(pos) instanceof FactionAnchorBlockEntity anchor) {
+            if (!TerraFactions.territories().placeAnchor(player, anchor)) rejectPlacement(level, pos, player, stack);
+        } else {
+            level.removeBlock(pos, false);
         }
+    }
+
+    private static void rejectPlacement(Level level, BlockPos pos, ServerPlayer player, ItemStack stack) {
+        level.removeBlock(pos, false);
+        // BlockItem consumes after setPlacedBy returns. Pre-refund survival stacks; creative is not consumed.
+        if (!player.getAbilities().instabuild) stack.grow(1);
     }
 
     @Override
