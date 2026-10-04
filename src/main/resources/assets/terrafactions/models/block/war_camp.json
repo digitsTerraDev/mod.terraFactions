@@ -1,6 +1,83 @@
 {
-  "parent": "minecraft:block/cube_all",
+  "ambientocclusion": true,
+  "render_type": "minecraft:cutout",
   "textures": {
-    "all": "minecraft:block/red_nether_bricks"
+    "fabric": "minecraft:block/white_wool",
+    "wood": "minecraft:block/stripped_oak_log",
+    "particle": "#fabric"
+  },
+  "elements": [
+    {
+      "from": [-6, 0, -4],
+      "to": [22, 30, -2],
+      "rotation": {"origin": [0, 0, -4], "axis": "x", "angle": 22.5},
+      "faces": {
+        "north": {"uv": [0, 0, 16, 16], "texture": "#fabric"},
+        "east": {"uv": [0, 0, 1, 16], "texture": "#fabric"},
+        "south": {"uv": [0, 0, 16, 16], "texture": "#fabric"},
+        "west": {"uv": [15, 0, 16, 16], "texture": "#fabric"},
+        "up": {"uv": [0, 0, 16, 1], "texture": "#fabric"},
+        "down": {"uv": [0, 15, 16, 16], "texture": "#fabric"}
+      }
+    },
+    {
+      "from": [-6, -1.44837, 13.28145],
+      "to": [22, 28.55163, 15.28145],
+      "rotation": {"origin": [1, 12.55163, 14.28145], "axis": "x", "angle": -22.5},
+      "faces": {
+        "north": {"uv": [0, 0, 16, 16], "texture": "#fabric"},
+        "east": {"uv": [0, 0, 1, 16], "texture": "#fabric"},
+        "south": {"uv": [0, 0, 16, 16], "texture": "#fabric"},
+        "west": {"uv": [15, 0, 16, 16], "texture": "#fabric"},
+        "up": {"uv": [0, 0, 16, 1], "texture": "#fabric"},
+        "down": {"uv": [0, 15, 16, 16], "texture": "#fabric"}
+      }
+    },
+    {
+      "from": [-5, 0, 7.75],
+      "to": [-4, 25, 8.75],
+      "faces": {
+        "north": {"uv": [6, 3, 10, 13], "texture": "#wood"},
+        "east": {"uv": [6, 3, 10, 13], "texture": "#wood"},
+        "south": {"uv": [6, 3, 10, 13], "texture": "#wood"},
+        "west": {"uv": [6, 3, 10, 13], "texture": "#wood"},
+        "up": {"uv": [6, 3, 10, 0], "texture": "#wood"},
+        "down": {"uv": [6, 16, 10, 13], "texture": "#wood"}
+      }
+    },
+    {
+      "from": [20, 0, 7.75],
+      "to": [21, 25, 8.75],
+      "faces": {
+        "north": {"uv": [6, 3, 10, 13], "texture": "#wood"},
+        "east": {"uv": [6, 3, 10, 13], "texture": "#wood"},
+        "south": {"uv": [6, 3, 10, 13], "texture": "#wood"},
+        "west": {"uv": [6, 3, 10, 13], "texture": "#wood"},
+        "up": {"uv": [6, 0, 10, 3], "texture": "#wood"},
+        "down": {"uv": [6, 13, 10, 16], "texture": "#wood"}
+      }
+    },
+    {
+      "from": [-4, 18, 7.75],
+      "to": [20, 19, 8.75],
+      "faces": {
+        "north": {"uv": [6.5, 1.5, 9.5, 14], "texture": "#wood", "rotation": 90},
+        "east": {"uv": [6.5, 1.5, 9.5, 14], "texture": "#wood", "rotation": 90},
+        "south": {"uv": [6.5, 1.5, 9.5, 14], "texture": "#wood", "rotation": 90},
+        "west": {"uv": [6.5, 1.5, 9.5, 14], "texture": "#wood", "rotation": 90},
+        "up": {"uv": [6.5, 1.5, 9.5, 0], "texture": "#wood", "rotation": 90},
+        "down": {"uv": [6.5, 16, 9.5, 14], "texture": "#wood", "rotation": 90}
+      }
+    }
+  ],
+  "display": {
+    "thirdperson_righthand": {"rotation": [60, 60, 0], "translation": [0, 1, 0], "scale": [0.25, 0.25, 0.25]},
+    "thirdperson_lefthand": {"rotation": [60, 60, 0], "scale": [0.25, 0.25, 0.25]},
+    "firstperson_righthand": {"rotation": [0, 60, 0], "scale": [0.25, 0.25, 0.25]},
+    "firstperson_lefthand": {"rotation": [0, 60, 0], "scale": [0.25, 0.25, 0.25]},
+    "ground": {"scale": [0.25, 0.25, 0.25]},
+    "gui": {"rotation": [30, 75, 0], "translation": [0, -1.5, 0], "scale": [0.35, 0.35, 0.35]},
+    "head": {"translation": [0, 10.25, 0], "scale": [0.6, 0.6, 0.6]},
+    "fixed": {"rotation": [0, 90, 0], "translation": [0, -2, 0], "scale": [0.5, 0.5, 0.5]}
   }
 }

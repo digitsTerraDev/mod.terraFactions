@@ -1,5 +1,5 @@
 {
   "variants": {
-    "": { "model": "terrafactions:block/war_camp" }
+    "": {"model": "terrafactions:block/war_camp"}
   }
 }

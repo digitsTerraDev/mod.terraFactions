@@ -11,13 +11,17 @@ class ProtectionActionTest {
         int core = ProtectionAction.defaultMask(TerritoryType.CORE);
         int border = ProtectionAction.defaultMask(TerritoryType.BORDER);
 
-        for (ProtectionAction action : ProtectionAction.values()) assertTrue(action.enabledIn(core));
+        for (ProtectionAction action : ProtectionAction.values()) {
+            if (action != ProtectionAction.PVP) assertTrue(action.enabledIn(core));
+        }
+        assertFalse(ProtectionAction.PVP.enabledIn(core));
         assertTrue(ProtectionAction.BLOCK_BREAKING.enabledIn(border));
         assertTrue(ProtectionAction.BLOCK_PLACEMENT.enabledIn(border));
         assertTrue(ProtectionAction.LIQUID_PLACEMENT.enabledIn(border));
         assertTrue(ProtectionAction.EXPLOSIONS.enabledIn(border));
         assertFalse(ProtectionAction.BLOCK_INTERACTIONS.enabledIn(border));
         assertFalse(ProtectionAction.ENTITY_INTERACTIONS.enabledIn(border));
+        assertFalse(ProtectionAction.PVP.enabledIn(border));
     }
 
     @Test

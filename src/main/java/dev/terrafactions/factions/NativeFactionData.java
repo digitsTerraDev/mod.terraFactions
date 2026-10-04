@@ -59,6 +59,10 @@ public final class NativeFactionData extends SavedData {
             faction.color = entry.getInt("color");
             faction.power = entry.getInt("power");
             faction.specialPower = entry.getInt("special_power");
+            faction.warWindowStartUtcMinute = entry.contains("war_window_utc_minute")
+                    ? entry.getInt("war_window_utc_minute") : 720;
+            faction.warWindowDurationMinutes = entry.contains("war_window_duration_minutes")
+                    ? entry.getInt("war_window_duration_minutes") : 360;
             if (entry.contains("core_protections", Tag.TAG_INT)) {
                 faction.coreProtections = entry.getInt("core_protections");
             }
@@ -110,7 +114,8 @@ public final class NativeFactionData extends SavedData {
             UUID factionId = entry.getUUID("faction");
             TerritoryType type = enumValue(TerritoryType.class, entry.getString("type"), TerritoryType.BORDER);
             boolean projected = entry.getBoolean("projected");
-            claims.put(key, new TerritoryClaim(key, factionId, type, projected));
+            claims.put(key, new TerritoryClaim(key, factionId, type, projected,
+                    entry.getString("source_anchor")));
         }
     }
 
@@ -137,8 +142,9 @@ public final class NativeFactionData extends SavedData {
                     entry.getInt("projected_radius"), entry.getInt("projected_claims"),
                     enumValue(AnchorPowerState.class, entry.getString("power_state"), AnchorPowerState.UNPOWERED),
                     enumValue(AnchorConnectionState.class, entry.getString("connection_state"), AnchorConnectionState.ISOLATED),
-                    enumValue(AnchorVulnerabilityState.class, entry.getString("vulnerability_state"), AnchorVulnerabilityState.GRACE_PERIOD),
-                    entry.getLong("isolation_start_tick")));
+                    enumValue(AnchorVulnerabilityState.class, entry.getString("vulnerability_state"), AnchorVulnerabilityState.INACTIVE),
+                    entry.getLong("isolation_start_tick"), entry.getBoolean("sky_exposed"),
+                    entry.getBoolean("capital"), entry.getInt("siege_damage")));
         }
     }
 
@@ -203,6 +209,8 @@ public final class NativeFactionData extends SavedData {
             entry.putInt("color", faction.color);
             entry.putInt("power", faction.power);
             entry.putInt("special_power", faction.specialPower);
+            entry.putInt("war_window_utc_minute", faction.warWindowStartUtcMinute);
+            entry.putInt("war_window_duration_minutes", faction.warWindowDurationMinutes);
             entry.putInt("core_protections", faction.coreProtections);
             entry.putInt("border_protections", faction.borderProtections);
             if (faction.createdAt >= 0L) entry.putLong("created_at", faction.createdAt);
@@ -255,6 +263,7 @@ public final class NativeFactionData extends SavedData {
             entry.putUUID("faction", claim.factionId());
             entry.putString("type", claim.type().name());
             entry.putBoolean("projected", claim.projected());
+            if (!claim.sourceAnchorId().isBlank()) entry.putString("source_anchor", claim.sourceAnchorId());
             entries.add(entry);
         }
         return entries;
@@ -292,6 +301,9 @@ public final class NativeFactionData extends SavedData {
             entry.putString("connection_state", anchor.connectionState.name());
             entry.putString("vulnerability_state", anchor.vulnerabilityState.name());
             entry.putLong("isolation_start_tick", anchor.isolationStartTick);
+            entry.putBoolean("sky_exposed", anchor.skyExposed);
+            entry.putBoolean("capital", anchor.capital);
+            entry.putInt("siege_damage", anchor.siegeDamage);
             entries.add(entry);
         }
         return entries;
@@ -325,6 +337,8 @@ public final class NativeFactionData extends SavedData {
         int color = 0xAAAAAA;
         int power;
         int specialPower;
+        int warWindowStartUtcMinute = 720;
+        int warWindowDurationMinutes = 360;
         int coreProtections = ProtectionAction.defaultMask(TerritoryType.CORE);
         int borderProtections = ProtectionAction.defaultMask(TerritoryType.BORDER);
         long createdAt = -1L;
@@ -381,11 +395,15 @@ public final class NativeFactionData extends SavedData {
         final AnchorConnectionState connectionState;
         final AnchorVulnerabilityState vulnerabilityState;
         final long isolationStartTick;
+        final boolean skyExposed;
+        final boolean capital;
+        final int siegeDamage;
 
         AnchorRecord(String id, UUID factionId, String dimension, int x, int y, int z, AnchorTier tier,
                      int allocatedPower, int usablePowerTenths, int priority, int projectedRadius, int projectedClaims,
                      AnchorPowerState powerState, AnchorConnectionState connectionState,
-                     AnchorVulnerabilityState vulnerabilityState, long isolationStartTick) {
+                     AnchorVulnerabilityState vulnerabilityState, long isolationStartTick,
+                     boolean skyExposed, boolean capital, int siegeDamage) {
             this.id = id;
             this.factionId = factionId;
             this.dimension = dimension;
@@ -402,6 +420,9 @@ public final class NativeFactionData extends SavedData {
             this.connectionState = connectionState;
             this.vulnerabilityState = vulnerabilityState;
             this.isolationStartTick = isolationStartTick;
+            this.skyExposed = skyExposed;
+            this.capital = capital;
+            this.siegeDamage = Math.max(0, siegeDamage);
         }
     }
 

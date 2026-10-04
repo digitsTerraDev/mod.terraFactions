@@ -99,6 +99,16 @@ The importer combines the shared legacy factions, users, and core claims with th
 
 ## Development
 
+## KubeJS anchor recipe
+
+TerraFactions ships no anchor or war-camp recipes. Install KubeJS for NeoForge and copy the included `kubejs` directory into
+the root of the server or modpack instance. The supplied
+`kubejs/server_scripts/terrafactions_anchors.js` creates the basic, advanced,
+master, and ultimate faction anchors plus the war camp, and is the intended place
+to change recipes.
+See `kubejs/examples/terrafactions_new_anchors.js.example` for copyable custom
+and bulk-anchor recipe examples.
+
 Use JDK 21:
 
 ```shell

@@ -98,7 +98,6 @@ public final class AnchorNetworkRules {
                                                                long isolationStart, long now, long graceTicks) {
         if (hasClaims && powerState != AnchorPowerState.FULL) return AnchorVulnerabilityState.VULNERABLE;
         if (connected) return AnchorVulnerabilityState.PROTECTED;
-        return now - isolationStart >= graceTicks
-                ? AnchorVulnerabilityState.VULNERABLE : AnchorVulnerabilityState.GRACE_PERIOD;
+        return AnchorVulnerabilityState.VULNERABLE;
     }
 }

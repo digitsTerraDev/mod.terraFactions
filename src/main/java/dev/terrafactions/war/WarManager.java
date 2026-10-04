@@ -78,16 +78,12 @@ public final class WarManager {
         if (!isReady()) return;
         pruneExpiredPowerModifiers(now);
         pruneExpiredPlunderBreaches(now);
+        long utcNow = System.currentTimeMillis();
         for (WarSnapshot war : allWars()) {
-            if (war.state() == WarState.PREPARING && now >= war.preparationEndsAt()) {
+            if (war.state() == WarState.PREPARING && utcNow >= war.preparationEndsAt()) {
                 startWar(war.id(), now);
             } else if (war.state() == WarState.ACTIVE) {
-                enforceWarDeadlines(war.id(), now);
-            }
-        }
-        for (WarCampSnapshot camp : allWarCamps()) {
-            if (camp.state() == WarCampState.ESTABLISHING && now >= camp.activationTime()) {
-                activateWarCamp(camp.id());
+                applyWarPressure(war, now, utcNow);
             }
         }
     }
@@ -96,41 +92,42 @@ public final class WarManager {
         return declareWar(attackerFactionId, defenderFactionId, WarGoalSnapshot.selected(goalType));
     }
 
+    public WarSnapshot declareWar(UUID attackerFactionId, UUID defenderFactionId) {
+        return declareWar(attackerFactionId, defenderFactionId, WarGoalSnapshot.selected(WarGoalType.PUNITIVE));
+    }
+
     public WarSnapshot declareWar(UUID attackerFactionId, UUID defenderFactionId, WarGoalSnapshot attackerGoal) {
         requireFaction(attackerFactionId);
         requireFaction(defenderFactionId);
         if (attackerFactionId.equals(defenderFactionId)) {
             throw new IllegalArgumentException("A faction cannot declare war on itself");
         }
-        attackerGoal = prepareSelectedGoal(Objects.requireNonNull(attackerGoal));
-        if (!attackerGoal.requiresWarCamp()) {
-            throw new IllegalArgumentException("A declaring faction must choose an offensive war goal");
-        }
+        Objects.requireNonNull(attackerGoal);
         if (getWarBetweenFactions(attackerFactionId, defenderFactionId) != null) {
             throw new IllegalStateException("Those factions already have an unresolved war");
         }
-        if (!factions.hasAnchor(attackerFactionId)) {
-            throw new IllegalStateException("Your faction must establish an anchor before declaring war");
+        if (!factions.hasActiveAnchor(attackerFactionId)) {
+            throw new IllegalStateException("Your faction must establish an active anchor before declaring war");
         }
-        if (!factions.hasAnchor(defenderFactionId)) {
-            throw new IllegalStateException("That faction has no anchor and cannot be declared on");
+        if (!factions.hasActiveAnchor(defenderFactionId)) {
+            throw new IllegalStateException("That faction has no active anchor and cannot be declared on");
         }
-        if (server == null || factions.members(defenderFactionId).stream()
-                .noneMatch(memberId -> server.getPlayerList().getPlayer(memberId) != null)) {
-            throw new IllegalStateException("At least one member of the defending faction must be online");
-        }
-
         long now = currentTime();
-        long preparationEndsAt = saturatedAdd(now, TerraFactionsConfig.WAR_PREPARATION_DURATION_TICKS.get());
+        long utcNow = System.currentTimeMillis();
+        long warnedAt = utcNow + TerraFactionsConfig.WAR_PREPARATION_DURATION_MINUTES.get() * 60_000L;
+        long preparationEndsAt = TerraFactionsConfig.WAR_WINDOWS_ENABLED.get()
+                ? factions.warWindow(defenderFactionId).nextStartUtcMillis(utcNow, warnedAt)
+                : warnedAt;
+        long activeEndsAt = TerraFactionsConfig.WAR_WINDOWS_ENABLED.get()
+                ? factions.warWindow(defenderFactionId).endAfterUtcMillis(preparationEndsAt) : 0L;
         UUID id = UUID.randomUUID();
         WarSnapshot war = new WarSnapshot(id, attackerFactionId, defenderFactionId, WarState.PREPARING,
-                new WarSideSnapshot(attackerFactionId, attackerGoal, null, false, false),
+                new WarSideSnapshot(attackerFactionId, null, null, false, false),
                 new WarSideSnapshot(defenderFactionId, null, null, false, false),
-                now, preparationEndsAt, 0L, 0L);
+                now, preparationEndsAt, 0L, 0L, activeEndsAt, 0L);
         factions.setRelation(attackerFactionId, defenderFactionId, FactionRelation.ENEMY);
         put(war);
         NeoForge.EVENT_BUS.post(new WarDeclaredEvent(war));
-        NeoForge.EVENT_BUS.post(new WarGoalSelectedEvent(war, attackerFactionId, attackerGoal.type()));
         return war;
     }
 
@@ -158,19 +155,31 @@ public final class WarManager {
         if (war.state() != WarState.PREPARING) {
             throw new IllegalStateException("Only a preparing war can become active");
         }
-        boolean defaultedDefense = war.defender().warGoal() == null;
-        WarSnapshot ready = WarRules.withDefaultDefenderGoal(war);
-        if (defaultedDefense) {
-            put(ready);
-            NeoForge.EVENT_BUS.post(new WarGoalSelectedEvent(
-                    ready, ready.defenderFactionId(), WarGoalType.DEFENSE));
-        }
-        ready = prepareWarGoals(ready);
-        WarSnapshot active = ready.withState(WarState.ACTIVE, now, 0L);
+        WarSnapshot active = war.withState(WarState.ACTIVE, now, 0L);
         put(active);
         NeoForge.EVENT_BUS.post(new WarStartedEvent(active));
-        if (!WarRules.hasViableOffensiveGoal(active)) return resolveWar(active.id(), now);
         return active;
+    }
+
+    private void applyWarPressure(WarSnapshot war, long now, long utcNow) {
+        if (TerraFactionsConfig.WAR_WINDOWS_ENABLED.get()
+                && war.activeEndsAt() > 0L && utcNow >= war.activeEndsAt()) {
+            forceEndWar(war.id(), now, "Defender war window ended");
+            return;
+        }
+        int interval = TerraFactionsConfig.WAR_POWER_DRAIN_INTERVAL_TICKS.get();
+        long last = war.lastPressureAt() <= 0L ? war.startedAt() : war.lastPressureAt();
+        long pulses = Math.max(0L, (now - last) / interval);
+        if (pulses == 0L) return;
+        int perPulse = TerraFactionsConfig.WAR_POWER_DRAIN_AMOUNT.get();
+        long total = Math.min(Integer.MAX_VALUE, pulses * (long) perPulse);
+        if (total > 0L) factions.adjustPower(war.defenderFactionId(), -(int) total);
+        put(war.withLastPressureAt(last + pulses * interval));
+    }
+
+    public boolean areAtActiveWar(UUID firstFactionId, UUID secondFactionId) {
+        WarSnapshot war = getWarBetweenFactions(firstFactionId, secondFactionId);
+        return war != null && war.state() == WarState.ACTIVE;
     }
 
     public WarSnapshot completeGoal(UUID warId, UUID factionId, String result) {

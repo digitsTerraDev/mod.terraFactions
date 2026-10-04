@@ -15,6 +15,8 @@ import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
+import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+import dev.terrafactions.registry.TerraFactionsBlockEntities;
 import net.neoforged.neoforge.client.gui.ConfigurationScreen;
 import net.neoforged.neoforge.client.gui.IConfigScreenFactory;
 import net.neoforged.neoforge.common.NeoForge;
@@ -33,19 +35,32 @@ public final class TerraFactionsClient {
             InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_H,
             "key.categories.terrafactions");
+    private static final KeyMapping TOGGLE_ANCHOR_BEAMS = new KeyMapping(
+            "key.terrafactions.toggle_anchor_beams",
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_C,
+            "key.categories.terrafactions");
     private static boolean hudVisibilitySynchronized;
+    private static boolean anchorBeamsVisible = true;
 
     public TerraFactionsClient(IEventBus modBus, ModContainer container) {
         container.registerExtensionPoint(IConfigScreenFactory.class, ConfigurationScreen::new);
         modBus.addListener(TerraFactionsClient::registerGuiLayers);
         modBus.addListener(TerraFactionsClient::registerKeyMappings);
+        modBus.addListener(TerraFactionsClient::registerRenderers);
         NeoForge.EVENT_BUS.addListener(TerraFactionsClient::onClientTick);
         NeoForge.EVENT_BUS.addListener(TerraFactionsClient::registerClientCommands);
+    }
+
+    private static void registerRenderers(EntityRenderersEvent.RegisterRenderers event) {
+        event.registerBlockEntityRenderer(TerraFactionsBlockEntities.FACTION_ANCHOR.get(),
+                FactionAnchorRenderer::new);
     }
 
     private static void registerKeyMappings(RegisterKeyMappingsEvent event) {
         event.register(OPEN_FACTION_MENU);
         event.register(TOGGLE_FACTION_HUD);
+        event.register(TOGGLE_ANCHOR_BEAMS);
     }
 
     private static void onClientTick(ClientTickEvent.Post event) {
@@ -70,6 +85,16 @@ public final class TerraFactionsClient {
             minecraft.player.displayClientMessage(net.minecraft.network.chat.Component.literal(
                     "TerraFactions UI " + (visible ? "shown" : "hidden") + "."), true);
         }
+        while (TOGGLE_ANCHOR_BEAMS.consumeClick()) {
+            if (minecraft.screen != null) continue;
+            anchorBeamsVisible = !anchorBeamsVisible;
+            minecraft.player.displayClientMessage(net.minecraft.network.chat.Component.literal(
+                    "Faction anchor beams " + (anchorBeamsVisible ? "shown" : "hidden") + "."), true);
+        }
+    }
+
+    public static boolean anchorBeamsVisible() {
+        return anchorBeamsVisible;
     }
 
     private static void registerClientCommands(RegisterClientCommandsEvent event) {

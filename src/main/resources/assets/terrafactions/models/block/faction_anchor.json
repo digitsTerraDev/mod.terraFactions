@@ -1,6 +1,45 @@
 {
-  "parent": "minecraft:block/cube_all",
+  "ambientocclusion": true,
+  "render_type": "minecraft:cutout",
   "textures": {
-    "all": "minecraft:block/crying_obsidian"
+    "obsidian": "minecraft:block/obsidian",
+    "eye": "minecraft:block/end_portal_frame_eye",
+    "particle": "#obsidian"
+  },
+  "elements": [
+    {
+      "from": [0, 0, 0],
+      "to": [16, 13, 16],
+      "faces": {
+        "north": {"uv": [0, 0, 16, 15], "texture": "#obsidian"},
+        "east": {"uv": [0, 1, 16, 16], "texture": "#obsidian"},
+        "south": {"uv": [0, 0, 16, 15], "texture": "#obsidian"},
+        "west": {"uv": [0, 1, 16, 16], "texture": "#obsidian"},
+        "up": {"uv": [0, 0, 16, 16], "texture": "#obsidian"},
+        "down": {"uv": [0, 0, 16, 16], "texture": "#obsidian"}
+      }
+    },
+    {
+      "from": [4, 12, 4],
+      "to": [12, 16, 12],
+      "faces": {
+        "north": {"uv": [4, 0, 12, 4], "texture": "#eye"},
+        "east": {"uv": [4, 0, 12, 4], "texture": "#eye"},
+        "south": {"uv": [4, 0, 12, 4], "texture": "#eye"},
+        "west": {"uv": [4, 0, 12, 4], "texture": "#eye"},
+        "up": {"uv": [4, 4, 12, 12], "texture": "#eye"},
+        "down": {"uv": [4, 4, 12, 12], "texture": "#eye"}
+      }
+    }
+  ],
+  "display": {
+    "thirdperson_righthand": {"rotation": [75, 0, 0], "translation": [0, 2.5, 0], "scale": [0.5, 0.5, 0.5]},
+    "thirdperson_lefthand": {"rotation": [75, 0, 0], "translation": [0, 2.5, 0], "scale": [0.5, 0.5, 0.5]},
+    "firstperson_righthand": {"rotation": [-15, 0, 0], "translation": [3, -1.5, 0], "scale": [0.75, 0.75, 0.75]},
+    "firstperson_lefthand": {"rotation": [-15, 0, 0], "translation": [3, -1.5, 0], "scale": [0.75, 0.75, 0.75]},
+    "ground": {"translation": [0, 2, 0], "scale": [0.5, 0.5, 0.5]},
+    "gui": {"rotation": [30.89, -12.94, 7.63], "scale": [0.6, 0.6, 0.6]},
+    "head": {"rotation": [-90, 0, 0], "translation": [0, 0, -1.5], "scale": [1.125, 1.125, 1.125]},
+    "fixed": {"translation": [0, 0.75, 1.5], "scale": [0.75, 0.75, 0.75]}
   }
 }

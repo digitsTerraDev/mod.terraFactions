@@ -30,7 +30,7 @@ public final class FactionWarCampBlock extends BaseEntityBlock {
     public static final MapCodec<FactionWarCampBlock> CODEC = simpleCodec(FactionWarCampBlock::new);
 
     public FactionWarCampBlock(BlockBehaviour.Properties properties) {
-        super(properties.strength(-1.0F, 3_600_000.0F).pushReaction(PushReaction.BLOCK));
+        super(properties.strength(-1.0F, 3_600_000.0F).noOcclusion().pushReaction(PushReaction.BLOCK));
     }
 
     @Override

@@ -2,6 +2,7 @@ package dev.terrafactions.factions;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.suggestion.Suggestions;
@@ -212,41 +213,43 @@ public final class FactionCommandService {
     }
 
     private LiteralArgumentBuilder<CommandSourceStack> buildWarCommands() {
-        LiteralArgumentBuilder<CommandSourceStack> declare = Commands.literal("declare");
-        for (WarGoalType goal : WarGoalType.values()) {
-            if (!goal.requiresWarCamp()) continue;
-            declare.then(Commands.literal(goal.name().toLowerCase(Locale.ROOT))
-                    .then(Commands.argument("faction", StringArgumentType.greedyString())
-                            .suggests(this::suggestFactionNames)
-                            .executes(context -> declareWar(context.getSource(), goal,
-                                    StringArgumentType.getString(context, "faction")))));
-        }
-        LiteralArgumentBuilder<CommandSourceStack> choose = Commands.literal("goal");
-        for (WarGoalType goal : WarGoalType.values()) {
-            choose.then(Commands.literal(goal.name().toLowerCase(Locale.ROOT))
-                    .then(Commands.argument("attacker", StringArgumentType.greedyString())
-                            .suggests(this::suggestFactionNames)
-                            .executes(context -> chooseWarGoal(context.getSource(), goal,
-                                    StringArgumentType.getString(context, "attacker")))));
-        }
         return Commands.literal("war")
                 .executes(context -> listWars(context.getSource()))
                 .then(Commands.literal("list").executes(context -> listWars(context.getSource())))
-                .then(Commands.literal("camp")
-                        .then(Commands.argument("opponent", StringArgumentType.greedyString())
+                .then(Commands.literal("declare")
+                        .then(Commands.argument("faction", StringArgumentType.greedyString())
                                 .suggests(this::suggestFactionNames)
-                                .executes(context -> selectWarCamp(context.getSource(),
-                                        StringArgumentType.getString(context, "opponent")))))
-                .then(Commands.literal("target")
-                        .then(warTargetLiteral("add", true))
-                        .then(warTargetLiteral("remove", false))
-                        .then(Commands.literal("list")
-                                .then(Commands.argument("opponent", StringArgumentType.greedyString())
-                                        .suggests(this::suggestFactionNames)
-                                        .executes(context -> listWarTargets(context.getSource(),
-                                                StringArgumentType.getString(context, "opponent"))))))
-                .then(declare)
-                .then(choose);
+                                .executes(context -> declareFormalWar(context.getSource(),
+                                        StringArgumentType.getString(context, "faction")))))
+                .then(Commands.literal("window")
+                        .then(Commands.argument("utcHour", IntegerArgumentType.integer(0, 23))
+                                .then(Commands.argument("utcMinute", IntegerArgumentType.integer(0, 59))
+                                        .then(Commands.argument("durationMinutes", IntegerArgumentType.integer(1, 1440))
+                                                .executes(context -> setWarWindow(context.getSource(),
+                                                        IntegerArgumentType.getInteger(context, "utcHour") * 60
+                                                                + IntegerArgumentType.getInteger(context, "utcMinute"),
+                                                        IntegerArgumentType.getInteger(context, "durationMinutes")))))));
+    }
+
+    private int declareFormalWar(CommandSourceStack source, String defenderName) throws CommandSyntaxException {
+        FactionIdentity actor = requireLeadership(source);
+        UUID defenderId = factions.factionByName(defenderName.trim());
+        if (defenderId == null) return fail(source, "No faction named " + defenderName.trim() + " exists.");
+        try {
+            WarSnapshot war = wars.declareWar(actor.id(), defenderId);
+            return success(source, "War declared on " + factions.factionName(defenderId)
+                    + ". They are warned now; fighting opens at "
+                    + java.time.Instant.ofEpochMilli(war.preparationEndsAt()) + " UTC.");
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            return fail(source, exception.getMessage());
+        }
+    }
+
+    private int setWarWindow(CommandSourceStack source, int start, int duration) throws CommandSyntaxException {
+        FactionIdentity actor = requireLeadership(source);
+        factions.setWarWindow(actor.id(), start, duration);
+        return success(source, "War window set: " + String.format(java.util.Locale.ROOT, "%02d:%02d", start / 60,
+                start % 60) + " UTC for " + duration + " minutes each day.");
     }
 
     private LiteralArgumentBuilder<CommandSourceStack> buildAdminCommands() {
@@ -313,7 +316,7 @@ public final class FactionCommandService {
                 selectedGoal = selectedGoal.withTargets(java.util.Set.of(target));
             }
             WarSnapshot war = wars.declareWar(actor.id(), defenderId, selectedGoal);
-            long seconds = Math.max(0L, war.preparationEndsAt() - war.declaredAt()) / 20L;
+            long seconds = Math.max(0L, war.preparationEndsAt() - System.currentTimeMillis()) / 1_000L;
             return success(source, "Declared " + goal.name().toLowerCase(Locale.ROOT) + " war on "
                     + factions.factionName(defenderId) + ". Preparation lasts " + seconds + " seconds. War ID: "
                     + shortId(war.id()) + ".");
@@ -352,14 +355,12 @@ public final class FactionCommandService {
         if (entries.isEmpty()) return success(source, "Your faction has no unresolved wars.");
         source.sendSuccess(() -> Component.literal("Wars (" + entries.size() + "):"), false);
         for (WarSnapshot war : entries) {
-            WarSideSnapshotView view = warView(war, actor.id());
             source.sendSuccess(() -> Component.literal(shortId(war.id()) + " | " + war.state().name()
-                    + " | vs " + factions.factionName(view.opponentId()) + " | Your goal: "
-                    + goalName(view.ownGoal()) + " | Camp: " + campState(war.side(actor.id()))
-                    + " | Occupied: " + wars.getOccupations(war.id(), actor.id()).size()
-                    + " | Breaches: " + wars.getPlunderBreaches(war.id(), actor.id()).stream()
-                    .filter(breach -> breach.active(source.getServer().overworld().getGameTime())).count()
-                    + " | Enemy goal: " + goalName(view.enemyGoal())), false);
+                    + " | vs " + factions.factionName(war.attackerFactionId().equals(actor.id())
+                    ? war.defenderFactionId() : war.attackerFactionId())
+                    + " | active window ends: " + (war.activeEndsAt() <= 0L
+                    ? "no daily window"
+                    : java.time.Instant.ofEpochMilli(war.activeEndsAt()) + " UTC")), false);
         }
         return entries.size();
     }

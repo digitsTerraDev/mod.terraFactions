@@ -67,9 +67,8 @@ public final class TerritoryRadarHud {
         }
         String warTitle = state.warVisible() ? "WAR: " + state.warOpponent() + " - "
                 + state.warState().name() : "";
-        String ownGoal = state.warVisible() ? "Goal: " + warGoalLabel() : "";
-        String enemyGoal = state.warVisible() ? "Enemy: "
-                + (state.enemyWarGoal() == null ? "Not selected" : pretty(state.enemyWarGoal().name())) : "";
+        String ownGoal = state.warVisible() ? "Pressure reduces defender Active Power during the window." : "";
+        String enemyGoal = state.warVisible() ? "Destroy vulnerable Border Anchors; breach fractured Capitals with siege." : "";
         if (state.warVisible()) {
             contentWidth = Math.max(contentWidth, minecraft.font.width(warTitle));
             contentWidth = Math.max(contentWidth, minecraft.font.width(ownGoal));
@@ -118,28 +117,13 @@ public final class TerritoryRadarHud {
                 }
                 graphics.drawString(minecraft.font, warTitle, textX, lineY, VULNERABLE_RED, false);
                 graphics.drawString(minecraft.font, ownGoal, textX, lineY + LINE_HEIGHT,
-                        state.ownWarFailed() ? VULNERABLE_RED
-                                : state.ownWarCompleted() ? 0xFF55FF55 : TerraUiTheme.VANILLA.text(), false);
+                        TerraUiTheme.VANILLA.text(), false);
                 graphics.drawString(minecraft.font, enemyGoal, textX, lineY + LINE_HEIGHT * 2,
                         TerraUiTheme.VANILLA.mutedText(), false);
             }
         } finally {
             graphics.pose().popPose();
         }
-    }
-
-    private static String warGoalLabel() {
-        WarGoalType goal = state.ownWarGoal();
-        if (goal == null) return "Not selected";
-        String label = pretty(goal.name());
-        if (goal == WarGoalType.CONQUEST || goal == WarGoalType.PLUNDER || goal == WarGoalType.PUNITIVE) {
-            label += " " + state.ownWarProgress() + "/" + state.ownWarRequired();
-        }
-        if (goal.requiresWarCamp()) {
-            label += " | Camp: " + (state.warCampState() == null
-                    ? "Not placed" : pretty(state.warCampState().name()));
-        }
-        return label;
     }
 
     private static String pretty(String name) {

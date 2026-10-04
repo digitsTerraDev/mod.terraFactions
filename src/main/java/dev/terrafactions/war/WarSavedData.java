@@ -247,6 +247,8 @@ final class WarSavedData extends SavedData {
         tag.putLong("preparation_ends_at", war.preparationEndsAt());
         tag.putLong("started_at", war.startedAt());
         tag.putLong("ended_at", war.endedAt());
+        tag.putLong("active_ends_at", war.activeEndsAt());
+        tag.putLong("last_pressure_at", war.lastPressureAt());
         tag.put("attacker_side", writeSide(war.attacker()));
         tag.put("defender_side", writeSide(war.defender()));
         return tag;
@@ -261,7 +263,8 @@ final class WarSavedData extends SavedData {
                     enumValue(WarState.class, tag.getString("state"), WarState.ENDED),
                     readSide(tag.getCompound("attacker_side")), readSide(tag.getCompound("defender_side")),
                     tag.getLong("declared_at"), tag.getLong("preparation_ends_at"),
-                    tag.getLong("started_at"), tag.getLong("ended_at"));
+                    tag.getLong("started_at"), tag.getLong("ended_at"),
+                    tag.getLong("active_ends_at"), tag.getLong("last_pressure_at"));
         } catch (IllegalArgumentException exception) {
             return null;
         }

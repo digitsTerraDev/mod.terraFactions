@@ -10,6 +10,7 @@ import dev.terrafactions.factions.FactionChatMode;
 import dev.terrafactions.factions.FactionRank;
 import dev.terrafactions.factions.FactionRelation;
 import dev.terrafactions.territory.ProtectionAction;
+import dev.terrafactions.territory.ProtectionPolicy;
 import dev.terrafactions.territory.TerritoryType;
 import dev.terrafactions.journeymap.TerraFactionsClientConfig;
 import dev.terrafactions.network.FactionUiPayload;
@@ -228,7 +229,7 @@ public final class FactionDashboardScreen extends Screen {
         if (!state.hasFaction() || state.factions().isEmpty()) return;
         FactionUiPayload.FactionEntry opponent = selectedWarOpponent();
         FactionUiPayload.WarEntry war = warWith(opponent.name());
-        int selectorWidth = Math.min(176, Math.max(110, contentWidth() / 2));
+        int selectorWidth = contentWidth();
         addRenderableWidget(TerraDropdown.builder(text("war_opponent"), state.factions(), opponent,
                         (dropdown, selected) -> {
                             selectedWarFaction = Math.max(0, state.factions().indexOf(selected));
@@ -238,47 +239,9 @@ public final class FactionDashboardScreen extends Screen {
                         })
                 .optionLabel(faction -> Component.literal("[" + faction.tag() + "] " + faction.name()))
                 .bounds(x, panelY + 48, selectorWidth, BUTTON_HEIGHT).theme(THEME).build());
-
-        boolean mayChooseGoal = state.rank().isLeadership()
-                && (war == null || war.state() == WarState.PREPARING && !war.attacker());
-        if (mayChooseGoal) {
-            List<WarGoalType> goals = war == null
-                    ? List.of(WarGoalType.CONQUEST, WarGoalType.PLUNDER, WarGoalType.PUNITIVE)
-                    : List.of(WarGoalType.DEFENSE, WarGoalType.CONQUEST,
-                    WarGoalType.PLUNDER, WarGoalType.PUNITIVE);
-            if (!goals.contains(warGoalChoice)) warGoalChoice = goals.getFirst();
-            addRenderableWidget(TerraDropdown.builder(text("war_goal"), goals, warGoalChoice,
-                            (dropdown, goal) -> {
-                                warGoalChoice = goal;
-                                selectedWarTarget = "";
-                                populateWidgets();
-                            })
-                    .optionLabel(FactionDashboardScreen::warGoalText)
-                    .bounds(x + selectorWidth + GAP, panelY + 48,
-                            contentWidth() - selectorWidth - GAP, BUTTON_HEIGHT).theme(THEME).build());
-        }
-
-        if (!state.rank().isLeadership()) return;
-        String target = selectedWarTarget;
-        if (war == null) {
+        if (state.rank().isLeadership() && war == null) {
             addButton(text("war_declare"), x, bottom, contentWidth(),
-                    button -> sendWar(Action.DECLARE_WAR, opponent.name(), warGoalChoice, target));
-            return;
-        }
-        if (war.state() == WarState.PREPARING && !war.attacker()) {
-            boolean canUpdateTargets = usesTargets(warGoalChoice) && war.ownGoal() == warGoalChoice;
-            int width = canUpdateTargets ? (contentWidth() - GAP) / 2 : contentWidth();
-            addButton(text("war_choose_goal"), x, bottom, width,
-                    button -> sendWar(Action.CHOOSE_WAR_GOAL, opponent.name(), warGoalChoice, target));
-            if (!canUpdateTargets) return;
-            addTargetButton(x + width + GAP, bottom, contentWidth() - width - GAP, opponent, war, target);
-        } else if (war.state() == WarState.PREPARING && usesTargets(war.ownGoal())) {
-            addTargetButton(x, bottom, contentWidth(), opponent, war, target);
-        } else if (war.state() == WarState.ACTIVE && war.ownGoal() != null
-                && war.ownGoal().requiresWarCamp() && war.campState() == null
-                && !war.ownCompleted() && !war.ownFailed()) {
-            addButton(text("war_assign_camp"), x, bottom, contentWidth(),
-                    button -> sendWar(Action.SELECT_WAR_CAMP, opponent.name(), null, ""));
+                    button -> sendWar(Action.DECLARE_WAR, opponent.name(), null, ""));
         }
     }
 
@@ -557,10 +520,13 @@ public final class FactionDashboardScreen extends Screen {
         graphics.drawString(font, text("core"), x, panelY + 41, THEME.mutedText(), false);
         graphics.drawString(font, text("border"), x + columnWidth + GAP,
                 panelY + 41, THEME.mutedText(), false);
-        if (panelHeight >= 235) {
+        int outsidePvpY = panelY + 52 + ProtectionAction.values().length * (BUTTON_HEIGHT + 2) + 3;
+        graphics.drawString(font, text("outside_pvp", protectionPolicyText(state.outsidePvpPolicy())),
+                x, outsidePvpY, THEME.mutedText(), false);
+        if (panelHeight >= 255) {
             wrapped(graphics, text(state.rank().isLeadership()
                             ? "protections_help" : "protections_view_only"),
-                    x, panelY + 190, contentWidth(), 2);
+                    x, outsidePvpY + 15, contentWidth(), 2);
         }
     }
 
@@ -601,60 +567,16 @@ public final class FactionDashboardScreen extends Screen {
         if (war == null) {
             graphics.drawString(font, text("war_no_active", opponent.name()), x, infoY,
                     THEME.mutedText(), false);
-            wrapped(graphics, warGoalDescription(warGoalChoice), x, infoY + 14, contentWidth(), 2);
+            wrapped(graphics, Component.literal("A declaration gives advance warning. At the defender's next "
+                    + "daily war window, their Active Power is forced down over time."),
+                    x, infoY + 14, contentWidth(), 3);
         } else {
             graphics.drawString(font, Component.literal(war.state().name() + " vs " + war.opponentName()),
                     x, infoY, 0xFF000000 | war.opponentColor(), false);
-            String ownGoal = war.ownGoal() == null ? text("war_not_selected").getString()
-                    : warGoalText(war.ownGoal()).getString() + goalProgress(war);
-            graphics.drawString(font, text("war_your_goal", ownGoal), x, infoY + 13,
-                    war.ownFailed() ? THEME.negative() : war.ownCompleted() ? THEME.positive() : THEME.text(), false);
-            graphics.drawString(font, text("war_enemy_goal", war.enemyGoal() == null
-                            ? text("war_not_selected").getString() : warGoalText(war.enemyGoal()).getString()),
-                    x, infoY + 26, THEME.mutedText(), false);
-            String camp = war.campState() == null ? text("war_not_placed").getString()
-                    : war.campState().name();
-            String timer = war.state() == WarState.PREPARING
-                    ? " | " + warPreparationSeconds(war) + "s" : "";
-            graphics.drawString(font, text("war_status", camp, war.occupiedAnchors(), timer),
-                    x, infoY + 39, THEME.mutedText(), false);
-        }
-
-        boolean assigningCamp = needsCampAssignment(war);
-        if (assigningCamp) {
-            int assignmentY = infoY + 54;
-            TerraGui.recessedPanel(graphics, x, assignmentY, contentWidth(), 29, THEME);
-            graphics.drawString(font, text("war_camp_assignment"), x + 6, assignmentY + 5,
-                    THEME.text(), false);
-            boolean holding = isHoldingWarCamp();
-            graphics.drawString(font, text(holding ? "war_camp_held" : "war_camp_hold_required"),
-                    x + 6, assignmentY + 16, holding ? THEME.positive() : THEME.negative(), false);
-        }
-
-        WarGoalType displayedGoal = war == null || war.state() == WarState.PREPARING && !war.attacker()
-                ? warGoalChoice : war.ownGoal();
-        if (usesTargets(displayedGoal)) {
-            List<FactionUiPayload.WarTargetEntry> targets = warTargets(opponent.name());
-            int listY = infoY + (war == null ? 45 : assigningCamp ? 88 : 57);
-            renderScroll(graphics, x, listY, contentWidth(),
-                    Math.max(24, panelY + panelHeight - 36 - listY), targets.size(), (entryY, index) -> {
-                        FactionUiPayload.WarTargetEntry target = targets.get(index);
-                        if (target.anchorId().equals(selectedWarTarget)) {
-                            graphics.fill(x + 2, entryY + 2, panelX + panelWidth - PAD - 15,
-                                    entryY + ROW_HEIGHT, 0x40FFFFFF);
-                        }
-                        boolean declared = war != null && war.targetAnchorIds().contains(target.anchorId());
-                        TerraGui.colorPip(graphics, x + 8, entryY + 4,
-                                target.breached() ? THEME.positive()
-                                        : target.occupied() ? 0xFFFFAA00
-                                        : declared ? 0xFFFF5555 : THEME.mutedText(), THEME);
-                        String label = target.tier().displayName() + " @ " + target.x() + ", " + target.z();
-                        drawFit(graphics, Component.literal(label), x + 23, entryY + 5,
-                                Math.max(40, contentWidth() - 105), THEME.text());
-                        Component power = Component.literal(target.allocatedPower() + " P");
-                        graphics.drawString(font, power, x + contentWidth() - font.width(power) - 16,
-                                entryY + 5, THEME.mutedText(), false);
-                    });
+            String status = war.state() == WarState.PREPARING
+                    ? "Warning active. Window opens in " + warPreparationSeconds(war) + "s."
+                    : "War pressure is active. Break vulnerable Borders; siege fractured Capitals.";
+            wrapped(graphics, Component.literal(status), x, infoY + 15, contentWidth(), 3);
         }
     }
 
@@ -944,8 +866,7 @@ public final class FactionDashboardScreen extends Screen {
     }
 
     private long warPreparationSeconds(FactionUiPayload.WarEntry war) {
-        long now = minecraft == null || minecraft.level == null ? 0L : minecraft.level.getGameTime();
-        return Math.max(0L, war.preparationEndsAt() - now) / 20L;
+        return Math.max(0L, war.preparationEndsAt() - System.currentTimeMillis()) / 1000L;
     }
 
     private int contentWidth() {
@@ -1028,6 +949,10 @@ public final class FactionDashboardScreen extends Screen {
 
     private static Component protectionText(ProtectionAction action) {
         return text("protection." + action.name().toLowerCase(Locale.ROOT));
+    }
+
+    private static Component protectionPolicyText(ProtectionPolicy policy) {
+        return text("protection_policy." + policy.name().toLowerCase(Locale.ROOT));
     }
 
     private static Component relationText(FactionUiPayload.FactionEntry faction) {

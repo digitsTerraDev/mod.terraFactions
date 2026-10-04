@@ -41,9 +41,11 @@ public record FactionActionPayload(Action action, String primary, String seconda
         CLAIM_CORE, UNCLAIM, SET_CAPITAL,
         DECLARE_RELATION,
         SET_NAME, SET_DESCRIPTION, SET_COLOR, SET_TAG,
-        SET_RADAR, SET_CHAT, SET_OVERLAY, SET_PROTECTION,
+        SET_RADAR, SET_CHAT, SET_OVERLAY, SET_PROTECTION, SET_WAR_WINDOW,
         IMPORT_PREVIEW, IMPORT_CONFIRM,
         ADMIN_GIVE_POWER, ADMIN_REMOVE_POWER,
-        DECLARE_WAR, CHOOSE_WAR_GOAL, ADD_WAR_TARGET, REMOVE_WAR_TARGET, SELECT_WAR_CAMP
+        DECLARE_WAR,
+        /** Legacy client action values are retained only so mixed client installs fail safely. */
+        CHOOSE_WAR_GOAL, ADD_WAR_TARGET, REMOVE_WAR_TARGET, SELECT_WAR_CAMP
     }
 }

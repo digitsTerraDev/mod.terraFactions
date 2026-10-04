@@ -22,6 +22,7 @@ import net.minecraft.world.phys.HitResult;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.entity.player.AttackEntityEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
 import net.neoforged.neoforge.event.level.ExplosionEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 
@@ -42,17 +43,12 @@ final class TerritoryProtection {
         NeoForge.EVENT_BUS.addListener(this::onUseEntity);
         NeoForge.EVENT_BUS.addListener(this::onUseEntitySpecific);
         NeoForge.EVENT_BUS.addListener(this::onAttackEntity);
+        NeoForge.EVENT_BUS.addListener(this::onLivingIncomingDamage);
         NeoForge.EVENT_BUS.addListener(this::onExplosion);
     }
 
     private void onBreakBlock(BlockEvent.BreakEvent event) {
         if (!(event.getPlayer() instanceof ServerPlayer player)) {
-            return;
-        }
-        if (territories.isOccupiedAnchor(event.getLevel(), event.getPos())) {
-            event.setCanceled(true);
-            player.displayClientMessage(Component.literal(
-                    "This occupied anchor must be liberated through a siege interaction."), true);
             return;
         }
         if (territories.isLastCapitalAnchor(event.getLevel(), event.getPos(), player.getUUID())) {
@@ -69,15 +65,22 @@ final class TerritoryProtection {
                 // ownership of the chunk around it.
                 return;
             }
+            var state = territories.anchorStateAt(event.getLevel(), event.getPos());
+            if (actor != null && state != null && !actor.id().equals(anchor.factionId())
+                    && factions.isEnemy(actor.id(), anchor.factionId())
+                    && state.vulnerabilityState().permitsNormalBreaking()) {
+                return;
+            }
             event.setCanceled(true);
             player.displayClientMessage(Component.literal(
-                    "Only a building member of the anchor's faction can remove it."), true);
+                    state != null && state.capital() && state.vulnerabilityState()
+                            == dev.terrafactions.anchor.AnchorVulnerabilityState.FRACTURED
+                            ? "The fractured Core must be breached with siege explosions first."
+                            : "That anchor is still protected by faction Power."), true);
             return;
         }
         TerritoryClaim claim = claimAt(event.getLevel(), event.getPos().getX() >> 4, event.getPos().getZ() >> 4);
         if (isProtectedAgainst(player, claim, ProtectionAction.BLOCK_BREAKING)) {
-            if (TerraFactionsConfig.PLUNDER_ALLOW_BLOCK_BREAKING.get()
-                    && territories.hasActivePlunderAccess(player, claim)) return;
             event.setCanceled(true);
             warn(player, claim.type());
         }
@@ -89,8 +92,6 @@ final class TerritoryProtection {
         }
         TerritoryClaim claim = claimAt(event.getLevel(), event.getPos().getX() >> 4, event.getPos().getZ() >> 4);
         if (isProtectedAgainst(player, claim, ProtectionAction.BLOCK_PLACEMENT)) {
-            if (TerraFactionsConfig.PLUNDER_ALLOW_BLOCK_PLACEMENT.get()
-                    && territories.hasActivePlunderAccess(player, claim)) return;
             event.setCanceled(true);
             warn(player, claim.type());
         }
@@ -134,8 +135,6 @@ final class TerritoryProtection {
                 ? clicked : clicked.relative(hit.getDirection());
         TerritoryClaim claim = claimAt(level, destination);
         if (!isProtectedAgainst(player, claim, ProtectionAction.LIQUID_PLACEMENT)) return false;
-        if (TerraFactionsConfig.PLUNDER_ALLOW_BLOCK_PLACEMENT.get()
-                && territories.hasActivePlunderAccess(player, claim)) return false;
         warn(player, claim.type());
         return true;
     }
@@ -154,19 +153,56 @@ final class TerritoryProtection {
 
     private void onAttackEntity(AttackEntityEvent event) {
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
-        // Territory protection must never make PvP one-way. Player damage is
-        // governed by normal Minecraft/friendly-fire rules in both directions.
-        if (event.getTarget() instanceof ServerPlayer) return;
+        // Faction territory protection must never make PvP one-way. Wilderness PvP has a
+        // separate, server-wide policy and otherwise follows normal Minecraft rules.
+        if (event.getTarget() instanceof ServerPlayer target) {
+            TerritoryClaim targetClaim = claimAt(target.level(), target.blockPosition());
+            if (targetClaim == null && TerraFactionsConfig.OUTSIDE_PVP_POLICY.get() == ProtectionPolicy.FORCED_OFF) {
+                event.setCanceled(true);
+                player.displayClientMessage(Component.literal("PvP is disabled in unclaimed territory."), true);
+            } else if (isProtectedAgainst(player, targetClaim, ProtectionAction.PVP)) {
+                event.setCanceled(true);
+                player.displayClientMessage(Component.literal("PvP is protected in this faction territory."), true);
+            }
+            return;
+        }
         TerritoryClaim claim = claimAt(player.level(), event.getTarget().blockPosition());
         if (isProtectedAgainst(player, claim, ProtectionAction.ENTITY_INTERACTIONS)) {
-            if (TerraFactionsConfig.PLUNDER_ALLOW_INTERACTIONS.get()
-                    && territories.hasActivePlunderAccess(player, claim)) return;
+            event.setCanceled(true);
+            warn(player, claim.type());
+        }
+    }
+
+    private void onLivingIncomingDamage(LivingIncomingDamageEvent event) {
+        if (!(event.getSource().getEntity() instanceof ServerPlayer player)) {
+            return;
+        }
+
+        if (event.getEntity() instanceof ServerPlayer target) {
+            TerritoryClaim targetClaim = claimAt(target.level(), target.blockPosition());
+            if (targetClaim == null && TerraFactionsConfig.OUTSIDE_PVP_POLICY.get() == ProtectionPolicy.FORCED_OFF) {
+                event.setCanceled(true);
+                player.displayClientMessage(Component.literal("PvP is disabled in unclaimed territory."), true);
+            } else if (isProtectedAgainst(player, targetClaim, ProtectionAction.PVP)) {
+                event.setCanceled(true);
+                player.displayClientMessage(Component.literal("PvP is protected in this faction territory."), true);
+            }
+            return;
+        }
+
+        // This matches melee entity protection for arrows, tridents, and every
+        // other player-owned projectile. It covers animals as well as villagers
+        // and other living entities that might be kept in a protected claim.
+        var target = event.getEntity();
+        TerritoryClaim claim = claimAt(target.level(), target.blockPosition());
+        if (isProtectedAgainst(player, claim, ProtectionAction.ENTITY_INTERACTIONS)) {
             event.setCanceled(true);
             warn(player, claim.type());
         }
     }
 
     private void onExplosion(ExplosionEvent.Detonate event) {
+        territories.applySiegeExplosion(event);
         event.getAffectedBlocks().removeIf(pos -> {
             TerritoryClaim claim = claimAt(event.getLevel(), pos);
             return protectionEnabled(claim, ProtectionAction.EXPLOSIONS);
@@ -181,8 +217,6 @@ final class TerritoryProtection {
                                               ProtectionAction action,
                                               net.neoforged.bus.api.ICancellableEvent event) {
         if (isProtectedAgainst(player, claim, action)) {
-            if (TerraFactionsConfig.PLUNDER_ALLOW_INTERACTIONS.get()
-                    && territories.hasActivePlunderAccess(player, claim)) return;
             event.setCanceled(true);
             warn(player, claim.type());
         }
@@ -194,7 +228,8 @@ final class TerritoryProtection {
     }
 
     private boolean protectionEnabled(TerritoryClaim claim, ProtectionAction action) {
-        return claim != null && factions.protectionEnabled(claim.factionId(), claim.type(), action);
+        if (claim == null || !territories.protectionActive(claim)) return false;
+        return factions.protectionEnabled(claim.factionId(), claim.type(), action);
     }
 
     private TerritoryClaim claimAt(LevelAccessor level, BlockPos pos) {

@@ -8,6 +8,7 @@ import dev.terrafactions.war.WarCampState;
 import dev.terrafactions.war.WarGoalType;
 import dev.terrafactions.war.WarState;
 import dev.terrafactions.anchor.AnchorTier;
+import dev.terrafactions.territory.ProtectionPolicy;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -27,6 +28,7 @@ public record FactionUiPayload(
         boolean coreVulnerable, boolean borderVulnerable,
         int coreProtectionMask, int borderProtectionMask,
         int coreConfigurableProtectionMask, int borderConfigurableProtectionMask,
+        int outsidePvpPolicyOrdinal,
         boolean radarEnabled, int chatModeOrdinal,
         List<MemberEntry> members, List<LossEntry> losses,
         List<FactionEntry> factions, List<WarEntry> wars, List<WarTargetEntry> warTargets,
@@ -49,7 +51,7 @@ public record FactionUiPayload(
     public static FactionUiPayload empty() {
         return new FactionUiPayload("", "", "", 0xAAAAAA, -1,
                 0, 0, 0, 0, 0, 0, 0, 0.0D, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", false, false,
-                0, 0, 0, 0, true, FactionChatMode.GLOBAL.ordinal(),
+                0, 0, 0, 0, ProtectionPolicy.FORCED_ON.ordinal(), true, FactionChatMode.GLOBAL.ordinal(),
                 List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
     }
 
@@ -63,6 +65,10 @@ public record FactionUiPayload(
 
     public FactionChatMode chatMode() {
         return enumValue(FactionChatMode.values(), chatModeOrdinal, FactionChatMode.GLOBAL);
+    }
+
+    public ProtectionPolicy outsidePvpPolicy() {
+        return enumValue(ProtectionPolicy.values(), outsidePvpPolicyOrdinal, ProtectionPolicy.FORCED_ON);
     }
 
     @Override
@@ -100,6 +106,7 @@ public record FactionUiPayload(
         buffer.writeInt(value.borderProtectionMask);
         buffer.writeInt(value.coreConfigurableProtectionMask);
         buffer.writeInt(value.borderConfigurableProtectionMask);
+        buffer.writeInt(value.outsidePvpPolicyOrdinal);
         buffer.writeBoolean(value.radarEnabled);
         buffer.writeInt(value.chatModeOrdinal);
         buffer.writeVarInt(value.members.size());
@@ -146,6 +153,7 @@ public record FactionUiPayload(
         int borderProtectionMask = buffer.readInt();
         int coreConfigurableProtectionMask = buffer.readInt();
         int borderConfigurableProtectionMask = buffer.readInt();
+        int outsidePvpPolicy = buffer.readInt();
         boolean radarEnabled = buffer.readBoolean();
         int chatMode = buffer.readInt();
         List<MemberEntry> members = readList(buffer, MemberEntry::read);
@@ -162,6 +170,7 @@ public record FactionUiPayload(
                 coreVulnerable, borderVulnerable,
                 coreProtectionMask, borderProtectionMask,
                 coreConfigurableProtectionMask, borderConfigurableProtectionMask,
+                outsidePvpPolicy,
                 radarEnabled, chatMode, members, losses, factions,
                 wars, warTargets, adminFactions);
     }

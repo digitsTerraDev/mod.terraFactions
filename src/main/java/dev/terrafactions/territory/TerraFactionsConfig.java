@@ -17,15 +17,24 @@ public final class TerraFactionsConfig {
     public static final ModConfigSpec.IntValue JOURNEYMAP_CLAIM_RADIUS;
     public static final ModConfigSpec.BooleanValue JOURNEYMAP_FACTION_ONLY_PLAYER_RADAR;
     public static final ModConfigSpec.IntValue MAX_ANCHOR_POWER;
-    public static final ModConfigSpec.IntValue ANCHOR_ISOLATION_GRACE_TICKS;
     public static final ModConfigSpec.IntValue ANCHOR_RECALCULATION_INTERVAL_TICKS;
+    public static final ModConfigSpec.IntValue ANCHOR_DISCONNECTION_GRACE_TICKS;
+    public static final ModConfigSpec.IntValue ANCHOR_MINIMUM_Y;
+    public static final ModConfigSpec.EnumValue<ProtectionPolicy> OUTSIDE_PVP_POLICY;
+    public static final ModConfigSpec.IntValue CORE_SIEGE_DAMAGE_REQUIRED;
+    public static final ModConfigSpec.IntValue CORE_SIEGE_RADIUS_BLOCKS;
     public static final ModConfigSpec.IntValue FACTION_ANCHOR_PLACEMENT_DEADLINE_TICKS;
     public static final ModConfigSpec.IntValue BASE_POWER;
     public static final ModConfigSpec.IntValue POWER_PER_MEMBER;
     public static final ModConfigSpec.IntValue DEATH_POWER_PENALTY;
     public static final ModConfigSpec.IntValue POWER_REGEN_INTERVAL_TICKS;
     public static final ModConfigSpec.IntValue POWER_REGEN_AMOUNT;
-    public static final ModConfigSpec.IntValue WAR_PREPARATION_DURATION_TICKS;
+    public static final ModConfigSpec.IntValue WAR_PREPARATION_DURATION_MINUTES;
+    public static final ModConfigSpec.BooleanValue WAR_WINDOWS_ENABLED;
+    public static final ModConfigSpec.IntValue DEFAULT_WAR_WINDOW_START_UTC_MINUTE;
+    public static final ModConfigSpec.IntValue DEFAULT_WAR_WINDOW_DURATION_MINUTES;
+    public static final ModConfigSpec.IntValue WAR_POWER_DRAIN_INTERVAL_TICKS;
+    public static final ModConfigSpec.IntValue WAR_POWER_DRAIN_AMOUNT;
     public static final ModConfigSpec.IntValue WAR_CAMP_ESTABLISHMENT_DURATION_TICKS;
     public static final ModConfigSpec.IntValue WAR_CAMP_PLACEMENT_DEADLINE_TICKS;
     public static final ModConfigSpec.IntValue WAR_MAX_DURATION_TICKS;
@@ -71,23 +80,52 @@ public final class TerraFactionsConfig {
                 .define("journeyMapFactionOnlyPlayerRadar", true);
         MAX_ANCHOR_POWER = builder.comment("Maximum power that can be allocated to one faction anchor.")
                 .defineInRange("maximumAnchorPower", 1000, 0, Integer.MAX_VALUE);
-        ANCHOR_ISOLATION_GRACE_TICKS = builder.comment("Ticks an isolated anchor remains protected before becoming vulnerable.")
-                .defineInRange("anchorIsolationGraceTicks", 24000, 0, Integer.MAX_VALUE);
         ANCHOR_RECALCULATION_INTERVAL_TICKS = builder.comment(
                         "Ticks between periodic anchor border reconciliations. Overlapping projections are awarded by effective anchor power and distance.")
                 .defineInRange("anchorRecalculationIntervalTicks", 200, 1, Integer.MAX_VALUE);
+        ANCHOR_DISCONNECTION_GRACE_TICKS = builder.comment(
+                        "Time an exposed anchor stays protected and pending after losing its connection to the Capital Anchor.")
+                .defineInRange("anchorDisconnectionGraceTicks", 12000, 0, Integer.MAX_VALUE);
+        ANCHOR_MINIMUM_Y = builder.comment(
+                        "Y offset from a dimension's sea level required for an anchor to activate (0 means sea level).")
+                .defineInRange("anchorMinimumYAboveSeaLevel", 0, -128, 320);
+        CORE_SIEGE_DAMAGE_REQUIRED = builder.comment(
+                        "Explosion damage required to breach a fractured Capital Anchor.")
+                .defineInRange("coreSiegeDamageRequired", 100, 1, Integer.MAX_VALUE);
+        CORE_SIEGE_RADIUS_BLOCKS = builder.comment(
+                        "Maximum distance from the Capital Anchor at which an explosion applies siege damage.")
+                .defineInRange("coreSiegeRadiusBlocks", 32, 1, 256);
         FACTION_ANCHOR_PLACEMENT_DEADLINE_TICKS = builder.comment(
                         "Ticks a newly created faction has to place its first anchor before being automatically disbanded.")
                 .defineInRange("factionAnchorPlacementDeadlineTicks", 12000, 20, Integer.MAX_VALUE);
         builder.pop();
         builder.push("protections");
+        OUTSIDE_PVP_POLICY = builder.comment(
+                        "Controls PvP in unclaimed territory. FORCED_ON is the default: faction protections never disable wilderness PvP.")
+                .defineEnum("outsidePvp", ProtectionPolicy.FORCED_ON);
         defineProtectionPolicies(builder, "core", CORE_PROTECTION_POLICIES);
         defineProtectionPolicies(builder, "border", BORDER_PROTECTION_POLICIES);
         builder.pop();
         builder.push("war");
-        WAR_PREPARATION_DURATION_TICKS = builder.comment(
-                        "Ticks between a formal war declaration and the war becoming active.")
-                .defineInRange("preparationDurationTicks", 12000, 0, Integer.MAX_VALUE);
+        WAR_PREPARATION_DURATION_MINUTES = builder.comment(
+                        "Real-world minutes between declaring a formal war and it becoming eligible to start.")
+                .defineInRange("preparationDurationMinutes", 10, 0, 10080);
+        WAR_WINDOWS_ENABLED = builder.comment(
+                        "When true, formal wars begin only in the defender's configured UTC daily window."
+                                + " When false, a war begins as soon as its preparation period ends.")
+                .define("warWindowsEnabled", true);
+        DEFAULT_WAR_WINDOW_START_UTC_MINUTE = builder.comment(
+                        "Default UTC minute of day at which a faction's daily war window begins (0-1439).")
+                .defineInRange("defaultWindowStartUtcMinute", 720, 0, 1439);
+        DEFAULT_WAR_WINDOW_DURATION_MINUTES = builder.comment(
+                        "Default real-world duration, in minutes, of a faction's daily UTC war window.")
+                .defineInRange("defaultWindowDurationMinutes", 360, 1, 1440);
+        WAR_POWER_DRAIN_INTERVAL_TICKS = builder.comment(
+                        "Ticks between Active Power pressure pulses during an active formal war.")
+                .defineInRange("powerDrainIntervalTicks", 1200, 20, Integer.MAX_VALUE);
+        WAR_POWER_DRAIN_AMOUNT = builder.comment(
+                        "Active Power removed from the defending faction per formal-war pressure pulse.")
+                .defineInRange("powerDrainAmount", 2, 0, Integer.MAX_VALUE);
         WAR_CAMP_ESTABLISHMENT_DURATION_TICKS = builder.comment(
                         "Ticks a placed War Camp spends establishing before it becomes active.")
                 .defineInRange("warCampEstablishmentDurationTicks", 12000, 0, Integer.MAX_VALUE);

@@ -21,6 +21,7 @@ public final class FactionAnchorScreen extends Screen {
 
     private AnchorStatePayload state;
     private TerraTextField powerField;
+    private TerraTextField priorityField;
     private Component validationMessage = Component.empty();
     private int panelX;
     private int panelY;
@@ -37,6 +38,9 @@ public final class FactionAnchorScreen extends Screen {
             if (screen.powerField != null && !screen.powerField.isFocused()) {
                 screen.powerField.setValue(Integer.toString(payload.allocatedPower()));
             }
+            if (screen.priorityField != null && !screen.priorityField.isFocused()) {
+                screen.priorityField.setValue(Integer.toString(payload.priority()));
+            }
             screen.validationMessage = Component.empty();
         } else {
             minecraft.setScreen(new FactionAnchorScreen(payload));
@@ -52,21 +56,26 @@ public final class FactionAnchorScreen extends Screen {
                 .maxLength(9).initialValue(Integer.toString(state.allocatedPower()))
                 .filter(value -> value.matches("\\d*"))
                 .hint(text("power")).theme(THEME).build());
+        priorityField = addRenderableWidget(TerraTextField.builder(font, Component.literal("Priority"))
+                .bounds(panelX + 150, panelY + 67, 62, 20)
+                .maxLength(6).initialValue(Integer.toString(state.priority()))
+                .filter(value -> value.matches("-?\\d*")).hint(Component.literal("Priority")).theme(THEME).build());
         addRenderableWidget(TerraButton.text(text("apply"), button -> applyPower())
-                .bounds(panelX + 150, panelY + 67, 62, 20).theme(THEME).build());
-        addRenderableWidget(TerraButton.text(CommonComponents.GUI_DONE, button -> onClose())
                 .bounds(panelX + 220, panelY + 67, 64, 20).theme(THEME).build());
+        addRenderableWidget(TerraButton.text(CommonComponents.GUI_DONE, button -> onClose())
+                .bounds(panelX + 220, panelY + 91, 64, 20).theme(THEME).build());
     }
 
     private void applyPower() {
         try {
             int power = Integer.parseInt(powerField.getValue());
+            int priority = Integer.parseInt(priorityField.getValue());
             if (power < 0 || power > state.maximumPower()) {
                 validationMessage = text("power_range", state.maximumPower());
                 return;
             }
             validationMessage = text("updating");
-            PacketDistributor.sendToServer(new AnchorPowerPayload(state.pos(), power));
+            PacketDistributor.sendToServer(new AnchorPowerPayload(state.pos(), power, priority));
         } catch (NumberFormatException exception) {
             validationMessage = text("power_range", state.maximumPower());
         }
@@ -98,17 +107,17 @@ public final class FactionAnchorScreen extends Screen {
                 THEME.mutedText(), false);
         graphics.drawString(font, text("radius", state.projectedRadius()), panelX + 150, panelY + 115,
                 THEME.mutedText(), false);
-        graphics.drawString(font, text("connection", stateText("connection_state", state.connectionState().name())),
-                panelX + 16, panelY + 129,
-                state.connectionState().name().equals("CONNECTED") ? THEME.positive() : THEME.negative(), false);
+        graphics.drawString(font, Component.literal(state.capital() ? "Core / Capital Anchor" : "Border Anchor"),
+                panelX + 16, panelY + 129, state.capital() ? 0xFFAA55FF : THEME.text(), false);
         graphics.drawString(font, text("vulnerability",
                         stateText("vulnerability_state", state.vulnerabilityState().name())), panelX + 150,
-                panelY + 129, state.vulnerabilityState().name().equals("PROTECTED")
-                        ? THEME.positive() : THEME.negative(), false);
-        if (state.isolationSecondsRemaining() > 0) {
-            graphics.drawString(font, text("grace", state.isolationSecondsRemaining()), panelX + 16,
-                    panelY + 143, THEME.mutedText(), false);
-        }
+                panelY + 129, state.vulnerabilityState().name().equals("PROTECTED") ? THEME.positive()
+                        : state.vulnerabilityState().name().equals("PENDING") ? 0xFFFFDD33 : THEME.negative(), false);
+        graphics.drawString(font, Component.literal(state.skyExposed() ? "Sky path: clear" : "Sky path: blocked"),
+                panelX + 16, panelY + 143, state.skyExposed() ? THEME.positive() : THEME.negative(), false);
+        if (state.capital() && state.siegeDamage() > 0) graphics.drawString(font,
+                Component.literal("Siege: " + state.siegeDamage() + "/" + state.siegeDamageRequired()),
+                panelX + 150, panelY + 143, THEME.negative(), false);
         graphics.drawString(font, text("power_help", state.maximumPower()), panelX + 16, panelY + 161,
                 THEME.mutedText(), false);
         if (!validationMessage.getString().isEmpty()) {

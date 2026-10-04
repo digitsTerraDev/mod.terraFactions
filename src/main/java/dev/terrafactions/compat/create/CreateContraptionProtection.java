@@ -1,6 +1,7 @@
 package dev.terrafactions.compat.create;
 
 import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
+import com.simibubi.create.content.contraptions.Contraption;
 import dev.terrafactions.TerraFactions;
 import dev.terrafactions.factions.FactionIdentity;
 import dev.terrafactions.factions.FactionRelation;
@@ -79,6 +80,35 @@ public final class CreateContraptionProtection {
                                        Iterable<BlockPos> targets) {
         for (BlockPos target : targets) {
             if (!canModify(entity, level, target)) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Rejects an assembly that would use a contraption rooted outside a claim to
+     * pull in claimed blocks through Super Glue, chassis, or other attachment
+     * mechanics. An assembled contraption may only contain claimed blocks from
+     * its source faction or one of that faction's allies.
+     */
+    public static boolean canAssemble(Contraption contraption, Level level) {
+        if (level.isClientSide() || contraption.anchor == null) return true;
+
+        TerritoryService territories = TerraFactions.territories();
+        if (territories == null || !territories.factions().isReady()) return true;
+
+        TerritoryClaim sourceClaim = claimAt(level, contraption.anchor);
+        UUID sourceFaction = sourceClaim == null ? null : sourceClaim.factionId();
+        for (BlockPos localPos : contraption.getBlocks().keySet()) {
+            TerritoryClaim capturedClaim = claimAt(level, contraption.anchor.offset(localPos));
+            if (capturedClaim == null) continue;
+
+            // Wilderness assemblies must never be able to pull any claimed block.
+            if (sourceFaction == null) return false;
+            if (!sourceFaction.equals(capturedClaim.factionId())
+                    && territories.factions().relation(capturedClaim.factionId(), sourceFaction)
+                    != FactionRelation.ALLIED) {
+                return false;
+            }
         }
         return true;
     }

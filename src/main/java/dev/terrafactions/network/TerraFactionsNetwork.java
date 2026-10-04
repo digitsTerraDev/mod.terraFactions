@@ -10,7 +10,7 @@ public final class TerraFactionsNetwork {
     }
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        var registrar = event.registrar("15");
+        var registrar = event.registrar("16");
         registrar.playToClient(TerritoryRadarPayload.TYPE, TerritoryRadarPayload.STREAM_CODEC,
                 (payload, context) -> TerritoryRadarHud.accept(payload));
         registrar.playToClient(FactionUiPayload.TYPE, FactionUiPayload.STREAM_CODEC,

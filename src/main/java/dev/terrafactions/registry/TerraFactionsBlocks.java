@@ -22,6 +22,9 @@ public final class TerraFactionsBlocks {
     public static final DeferredBlock<FactionAnchorBlock> MASTER_FACTION_ANCHOR =
             BLOCKS.registerBlock("master_faction_anchor",
                     properties -> new FactionAnchorBlock(properties, AnchorTier.MASTER));
+    public static final DeferredBlock<FactionAnchorBlock> ULTIMATE_FACTION_ANCHOR =
+            BLOCKS.registerBlock("ultimate_faction_anchor",
+                    properties -> new FactionAnchorBlock(properties, AnchorTier.ULTIMATE));
     public static final DeferredBlock<FactionWarCampBlock> WAR_CAMP =
             BLOCKS.registerBlock("war_camp", FactionWarCampBlock::new);
     public static final DeferredItem<BlockItem> FACTION_ANCHOR_ITEM = ITEMS.register("faction_anchor",
@@ -30,6 +33,8 @@ public final class TerraFactionsBlocks {
             () -> new BlockItem(ADVANCED_FACTION_ANCHOR.get(), new Item.Properties()));
     public static final DeferredItem<BlockItem> MASTER_FACTION_ANCHOR_ITEM = ITEMS.register("master_faction_anchor",
             () -> new BlockItem(MASTER_FACTION_ANCHOR.get(), new Item.Properties()));
+    public static final DeferredItem<BlockItem> ULTIMATE_FACTION_ANCHOR_ITEM = ITEMS.register("ultimate_faction_anchor",
+            () -> new BlockItem(ULTIMATE_FACTION_ANCHOR.get(), new Item.Properties()));
     public static final DeferredItem<BlockItem> WAR_CAMP_ITEM = ITEMS.register("war_camp",
             () -> new BlockItem(WAR_CAMP.get(), new Item.Properties().stacksTo(1)));
 

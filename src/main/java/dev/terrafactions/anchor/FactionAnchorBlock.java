@@ -25,7 +25,7 @@ public final class FactionAnchorBlock extends BaseEntityBlock {
     private final AnchorTier tier;
 
     public FactionAnchorBlock(BlockBehaviour.Properties properties, AnchorTier tier) {
-        super(properties.strength(5.0F, 1200.0F).requiresCorrectToolForDrops()
+        super(properties.strength(5.0F, 1200.0F).requiresCorrectToolForDrops().noOcclusion()
                 .pushReaction(PushReaction.BLOCK));
         this.tier = tier;
     }

@@ -16,7 +16,8 @@ public final class TerraFactionsBlockEntities {
             BLOCK_ENTITIES.register("faction_anchor", () -> BlockEntityType.Builder.of(
                     FactionAnchorBlockEntity::new, TerraFactionsBlocks.FACTION_ANCHOR.get(),
                     TerraFactionsBlocks.ADVANCED_FACTION_ANCHOR.get(),
-                    TerraFactionsBlocks.MASTER_FACTION_ANCHOR.get()).build(null));
+                    TerraFactionsBlocks.MASTER_FACTION_ANCHOR.get(),
+                    TerraFactionsBlocks.ULTIMATE_FACTION_ANCHOR.get()).build(null));
 
     public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<FactionWarCampBlockEntity>> WAR_CAMP =
             BLOCK_ENTITIES.register("war_camp", () -> BlockEntityType.Builder.of(

@@ -172,10 +172,12 @@ final class ClaimOverlayManager {
             int mask = vulnerabilityMask(faction);
             boolean vulnerabilityChanged = vulnerabilityMasks.getOrDefault(faction.id(), -1) != mask;
             vulnerabilityMasks.put(faction.id(), mask);
+            boolean hasPendingAnchor = anchors.getOrDefault(faction.id(), List.of()).stream()
+                    .anyMatch(anchor -> anchor.vulnerabilityState() == AnchorVulnerabilityState.PENDING);
             if (!faction.equals(knownFactions.get(faction.id()))
                     || !anchors.getOrDefault(faction.id(), List.of())
                     .equals(knownAnchors.getOrDefault(faction.id(), List.of()))
-                    || vulnerabilityChanged || mask != 0) {
+                    || vulnerabilityChanged || mask != 0 || hasPendingAnchor) {
                 updateFaction(faction);
             }
         }
@@ -230,13 +232,7 @@ final class ClaimOverlayManager {
 
     private int currentWarSignature() {
         if (!TerraFactions.territories().wars().isReady()) return 0;
-        long now = server == null ? 0L : server.overworld().getGameTime();
-        List<PlunderBreachSnapshot> activeBreaches = TerraFactions.territories().wars().allPlunderBreaches()
-                .stream().filter(breach -> breach.active(now)).toList();
-        return Objects.hash(TerraFactions.territories().wars().allWars(),
-                TerraFactions.territories().wars().allWarCamps(),
-                TerraFactions.territories().wars().allOccupations(),
-                activeBreaches);
+        return Objects.hash(TerraFactions.territories().wars().allWars());
     }
 
     private void clearWarOverlays(ServerPlayer player) {
@@ -248,15 +244,8 @@ final class ClaimOverlayManager {
     private void showWars(ServerPlayer player) {
         FactionIdentity viewer = TerraFactions.territories().factions().factionForPlayer(player.getUUID());
         if (viewer == null || !TerraFactions.territories().wars().isReady()) return;
-        Set<String> ids = warOverlayIds.computeIfAbsent(player.getUUID(), ignored -> new HashSet<>());
-        for (WarSnapshot war : TerraFactions.territories().wars().getWarsForFaction(viewer.id())) {
-            if (war.state() == WarState.ENDED) continue;
-            showWarCamps(player, war, ids);
-            showWarObjectives(player, war, ids);
-            showWarOccupations(player, war, ids);
-            showInvasionRoutes(player, war, ids);
-        }
-        showPlunderBreaches(player, viewer.id(), ids);
+        // Anchor icons and their state already describe the entire physical-war objective.
+        // There are no camps, occupations, breaches, routes, or capture targets to overlay.
     }
 
     private void showPlunderBreaches(ServerPlayer player, UUID viewerFactionId, Set<String> ids) {
@@ -414,11 +403,11 @@ final class ClaimOverlayManager {
         }
         showCapital(player, faction, ids);
         showAnchors(player, faction, ids);
+        showAnchorConnections(player, faction, currentAnchors().getOrDefault(faction.id(), List.of()), ids);
     }
 
     private void showAnchors(ServerPlayer player, FactionSnapshot faction, Set<String> ids) {
         List<AnchorMapSnapshot> anchors = currentAnchors().getOrDefault(faction.id(), List.of());
-        showAnchorConnections(player, faction, anchors, ids);
         for (AnchorMapSnapshot anchor : anchors) {
             ResourceLocation dimensionId = ResourceLocation.tryParse(anchor.dimension());
             if (dimensionId == null) continue;
@@ -428,7 +417,7 @@ final class ClaimOverlayManager {
             ids.add(iconId);
             overlayApi.show(player, TerraFactions.MOD_ID,
                     new ServerPolygon(iconId, dimension, List.of(anchorIcon(anchor)),
-                            anchorIconProperties(faction, anchor)));
+                            anchorIconProperties(faction, anchor, flashBright)));
 
         }
     }
@@ -461,8 +450,8 @@ final class ClaimOverlayManager {
                 }
                 ids.add(id);
                 overlayApi.show(player, TerraFactions.MOD_ID,
-                        new ServerPolygon(id, dimension, shapes,
-                                anchorConnectionProperties(faction, first, second)));
+                    new ServerPolygon(id, dimension, shapes,
+                                anchorConnectionProperties(faction, first, second, flashBright)));
             }
         }
     }
@@ -576,15 +565,19 @@ final class ClaimOverlayManager {
         float normalFill = type != TerritoryType.BORDER ? 0.38f : 0.18f;
         float normalStrokeWidth = type != TerritoryType.BORDER ? 2.0f : 1.0f;
         float normalStrokeOpacity = type != TerritoryType.BORDER ? 0.95f : 0.60f;
-        boolean vulnerable = state == AnchorVulnerabilityState.VULNERABLE;
-        boolean isolated = state == AnchorVulnerabilityState.GRACE_PERIOD;
+        boolean vulnerable = state.permitsNormalBreaking();
+        boolean pending = state == AnchorVulnerabilityState.PENDING;
+        boolean isolated = state == AnchorVulnerabilityState.INACTIVE;
+        int color = isolated ? 0xFFAA00 : faction.color();
         return new OverlayShapeProps(
-                isolated ? 0xFFAA00 : faction.color(),
+                color,
                 vulnerable ? (flashBright ? normalFill : normalFill * 0.30f)
-                        : isolated ? normalFill * 0.65f : normalFill,
-                vulnerable ? 0xFF3030 : isolated ? 0xFFAA00 : faction.color(),
-                vulnerable ? normalStrokeWidth + 1.5f : isolated ? normalStrokeWidth + 0.5f : normalStrokeWidth,
-                vulnerable ? (flashBright ? 1.0f : 0.25f) : isolated ? 0.85f : normalStrokeOpacity,
+                        : isolated ? normalFill * 0.65f : pending ? (flashBright ? normalFill : 0.0f) : normalFill,
+                vulnerable ? 0xFF3030 : color,
+                vulnerable ? normalStrokeWidth + 1.5f : isolated || pending
+                        ? normalStrokeWidth + 0.5f : normalStrokeWidth,
+                vulnerable ? (flashBright ? 1.0f : 0.25f) : isolated ? 0.85f
+                        : pending ? (flashBright ? normalStrokeOpacity : 0.0f) : normalStrokeOpacity,
                 1000,
                 UIState.FULLSCREEN_ZOOM_MIN,
                 UIState.ZOOM_IN_MAX,
@@ -629,11 +622,19 @@ final class ClaimOverlayManager {
     }
 
     @SuppressWarnings("deprecation")
-    private static OverlayShapeProps anchorIconProperties(FactionSnapshot faction, AnchorMapSnapshot anchor) {
-        int color = anchor.vulnerabilityState() == AnchorVulnerabilityState.VULNERABLE ? 0xFF3030
-                : anchor.vulnerabilityState() == AnchorVulnerabilityState.GRACE_PERIOD ? 0xFFAA00
-                : faction.color();
-        return new OverlayShapeProps(color, 0.90f, 0xFFFFFF, 1.5f, 0.95f, 1003,
+    private static OverlayShapeProps anchorIconProperties(FactionSnapshot faction, AnchorMapSnapshot anchor,
+                                                           boolean flashBright) {
+        int color = switch (anchor.vulnerabilityState()) {
+            case VULNERABLE -> 0xFFFF9900;
+            case FRACTURED -> 0xFFAA44FF;
+            case SIEGE_BREACHED -> 0xFFFF3030;
+            case PENDING -> faction.color();
+            case INACTIVE -> 0xFF777777;
+            case PROTECTED -> faction.color();
+        };
+        boolean pending = anchor.vulnerabilityState() == AnchorVulnerabilityState.PENDING;
+        return new OverlayShapeProps(color, pending && !flashBright ? 0.0f : 0.90f, 0xFFFFFF,
+                pending && !flashBright ? 0.0f : 1.5f, pending && !flashBright ? 0.0f : 0.95f, 1003,
                 UIState.FULLSCREEN_ZOOM_MIN, UIState.ZOOM_IN_MAX,
                 EnumSet.allOf(Context.UI.class), EnumSet.allOf(Context.MapType.class), "◆",
                 anchor.tier().displayName() + " Faction Anchor — " + faction.name()
@@ -645,16 +646,24 @@ final class ClaimOverlayManager {
     @SuppressWarnings("deprecation")
     private static OverlayShapeProps anchorConnectionProperties(FactionSnapshot faction,
                                                                  AnchorMapSnapshot first,
-                                                                 AnchorMapSnapshot second) {
-        AnchorVulnerabilityState state = first.vulnerabilityState() == AnchorVulnerabilityState.VULNERABLE
-                || second.vulnerabilityState() == AnchorVulnerabilityState.VULNERABLE
-                ? AnchorVulnerabilityState.VULNERABLE
-                : first.vulnerabilityState() == AnchorVulnerabilityState.GRACE_PERIOD
-                || second.vulnerabilityState() == AnchorVulnerabilityState.GRACE_PERIOD
-                ? AnchorVulnerabilityState.GRACE_PERIOD : AnchorVulnerabilityState.PROTECTED;
-        int color = state == AnchorVulnerabilityState.VULNERABLE ? 0xFF3030
-                : state == AnchorVulnerabilityState.GRACE_PERIOD ? 0xFFAA00 : faction.color();
-        return new OverlayShapeProps(color, 0.68f, color, 0.0f, 0.0f, 1002,
+                                                                 AnchorMapSnapshot second, boolean flashBright) {
+        int color;
+        if (first.vulnerabilityState() == AnchorVulnerabilityState.INACTIVE
+                || second.vulnerabilityState() == AnchorVulnerabilityState.INACTIVE) {
+            color = 0xFF777777;
+        } else if (first.vulnerabilityState() == AnchorVulnerabilityState.PENDING
+                || second.vulnerabilityState() == AnchorVulnerabilityState.PENDING) {
+            color = faction.color();
+        } else if (first.vulnerabilityState().permitsNormalBreaking()
+                || second.vulnerabilityState().permitsNormalBreaking()) {
+            color = 0xFFFF9900;
+        } else {
+            color = faction.color();
+        }
+        boolean pending = first.vulnerabilityState() == AnchorVulnerabilityState.PENDING
+                || second.vulnerabilityState() == AnchorVulnerabilityState.PENDING;
+        return new OverlayShapeProps(color, pending && !flashBright ? 0.0f : 0.68f, color,
+                0.0f, 0.0f, 1002,
                 UIState.FULLSCREEN_ZOOM_MIN, UIState.ZOOM_IN_MAX,
                 EnumSet.allOf(Context.UI.class), EnumSet.allOf(Context.MapType.class),
                 null, null);

@@ -85,7 +85,7 @@ class AnchorNetworkRulesTest {
         assertEquals(AnchorPowerState.UNPOWERED, AnchorNetworkRules.powerState(100, 0));
         assertEquals(AnchorVulnerabilityState.PROTECTED, AnchorNetworkRules.vulnerabilityState(
                 AnchorPowerState.FULL, true, true, 0, 100, 200));
-        assertEquals(AnchorVulnerabilityState.GRACE_PERIOD, AnchorNetworkRules.vulnerabilityState(
+        assertEquals(AnchorVulnerabilityState.VULNERABLE, AnchorNetworkRules.vulnerabilityState(
                 AnchorPowerState.FULL, false, true, 100, 250, 200));
         assertEquals(AnchorVulnerabilityState.VULNERABLE, AnchorNetworkRules.vulnerabilityState(
                 AnchorPowerState.FULL, false, true, 100, 300, 200));

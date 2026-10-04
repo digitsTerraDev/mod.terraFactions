@@ -145,7 +145,7 @@ public final class NativeFactionService {
                 .filter(claim -> claim.factionId().equals(factionId))
                 .mapToLong(TerritoryClaim::powerCostTenths).sum();
         usage += state.anchors.values().stream()
-                .filter(anchor -> anchor.factionId.equals(factionId))
+                .filter(anchor -> anchor.factionId.equals(factionId) && anchor.skyExposed)
                 .mapToLong(anchor -> AnchorNetworkRules.requiredPowerTenths(
                         anchor.tier, anchor.projectedClaims))
                 .sum();
@@ -185,6 +185,19 @@ public final class NativeFactionService {
         requireData().setDirty();
     }
 
+    public FactionWarWindow warWindow(UUID factionId) {
+        FactionRecord faction = requireFaction(factionId);
+        return new FactionWarWindow(faction.warWindowStartUtcMinute, faction.warWindowDurationMinutes);
+    }
+
+    public void setWarWindow(UUID factionId, int startUtcMinute, int durationMinutes) {
+        FactionWarWindow window = new FactionWarWindow(startUtcMinute, durationMinutes);
+        FactionRecord faction = requireFaction(factionId);
+        faction.warWindowStartUtcMinute = window.startUtcMinute();
+        faction.warWindowDurationMinutes = window.durationMinutes();
+        requireData().setDirty();
+    }
+
     public FactionDisplay factionDisplay(UUID factionId) {
         FactionRecord faction = requireData().factions.get(factionId);
         return faction == null ? null : new FactionDisplay(faction.name, faction.color);
@@ -209,6 +222,8 @@ public final class NativeFactionService {
         UUID id = UUID.randomUUID();
         FactionRecord faction = new FactionRecord(id, name);
         faction.createdAt = Math.max(0L, createdAt);
+        faction.warWindowStartUtcMinute = TerraFactionsConfig.DEFAULT_WAR_WINDOW_START_UTC_MINUTE.get();
+        faction.warWindowDurationMinutes = TerraFactionsConfig.DEFAULT_WAR_WINDOW_DURATION_MINUTES.get();
         state.factions.put(id, faction);
         state.members.put(ownerId, new MemberRecord(id, FactionRank.OWNER));
         faction.power = baseMaximumPower(id);
@@ -222,6 +237,12 @@ public final class NativeFactionService {
 
     public boolean hasAnchor(UUID factionId) {
         return requireData().anchors.values().stream().anyMatch(anchor -> anchor.factionId.equals(factionId));
+    }
+
+    public boolean hasActiveAnchor(UUID factionId) {
+        return requireData().anchors.values().stream().anyMatch(anchor ->
+                anchor.factionId.equals(factionId) && anchor.skyExposed
+                        && anchor.vulnerabilityState != AnchorVulnerabilityState.INACTIVE);
     }
 
     public void disband(UUID factionId) {
@@ -411,7 +432,7 @@ public final class NativeFactionService {
                         anchor.x, anchor.y, anchor.z, anchor.tier, anchor.allocatedPower,
                         anchor.usablePowerTenths, anchor.priority, anchor.projectedRadius, anchor.projectedClaims,
                         anchor.powerState, anchor.connectionState, anchor.vulnerabilityState,
-                        anchor.isolationStartTick))
+                        anchor.isolationStartTick, anchor.skyExposed, anchor.capital, anchor.siegeDamage))
                 .toList();
     }
 
@@ -420,7 +441,8 @@ public final class NativeFactionService {
         return anchor == null ? null : new AnchorMapSnapshot(anchor.id, anchor.factionId, anchor.dimension,
                 anchor.x, anchor.y, anchor.z, anchor.tier, anchor.allocatedPower, anchor.usablePowerTenths,
                 anchor.priority, anchor.projectedRadius, anchor.projectedClaims, anchor.powerState,
-                anchor.connectionState, anchor.vulnerabilityState, anchor.isolationStartTick);
+                anchor.connectionState, anchor.vulnerabilityState, anchor.isolationStartTick,
+                anchor.skyExposed, anchor.capital, anchor.siegeDamage);
     }
 
     public void putAnchor(AnchorMapSnapshot anchor) {
@@ -436,14 +458,17 @@ public final class NativeFactionService {
                 && existing.powerState == anchor.powerState()
                 && existing.connectionState == anchor.connectionState()
                 && existing.vulnerabilityState == anchor.vulnerabilityState()
-                && existing.isolationStartTick == anchor.isolationStartTick()) {
+                && existing.isolationStartTick == anchor.isolationStartTick()
+                && existing.skyExposed == anchor.skyExposed() && existing.capital == anchor.capital()
+                && existing.siegeDamage == anchor.siegeDamage()) {
             return;
         }
         requireData().anchors.put(anchor.id(), new AnchorRecord(anchor.id(), anchor.factionId(),
                 anchor.dimension(), anchor.x(), anchor.y(), anchor.z(), anchor.tier(),
                 anchor.allocatedPower(), anchor.usablePowerTenths(), anchor.priority(), anchor.projectedRadius(),
                 anchor.projectedClaims(), anchor.powerState(), anchor.connectionState(),
-                anchor.vulnerabilityState(), anchor.isolationStartTick()));
+                anchor.vulnerabilityState(), anchor.isolationStartTick(), anchor.skyExposed(),
+                anchor.capital(), anchor.siegeDamage()));
         requireData().setDirty();
     }
 
@@ -469,7 +494,7 @@ public final class NativeFactionService {
                 anchor.x(), anchor.y(), anchor.z(), anchor.tier(), anchor.allocatedPower(), 0,
                 anchor.priority(), anchor.projectedRadius(), anchor.projectedClaims(),
                 AnchorPowerState.UNPOWERED, AnchorConnectionState.ISOLATED,
-                AnchorVulnerabilityState.GRACE_PERIOD, now);
+                AnchorVulnerabilityState.INACTIVE, now);
         putAnchor(transferred);
 
         TerritoryKey center = normalizer.apply(new TerritoryKey(anchor.dimension(),
@@ -516,9 +541,31 @@ public final class NativeFactionService {
     }
 
     public void putProjectedClaim(TerritoryKey key, UUID factionId) {
+        putProjectedClaim(key, factionId, TerritoryType.BORDER, "");
+    }
+
+    public void putProjectedClaim(TerritoryKey key, UUID factionId, TerritoryType type, String sourceAnchorId) {
         requireFaction(factionId);
-        requireData().claims.put(key, new TerritoryClaim(key, factionId, TerritoryType.BORDER, true));
+        requireData().claims.put(key, new TerritoryClaim(key, factionId, type, true, sourceAnchorId));
         requireData().setDirty();
+    }
+
+    public int removeClaimsProjectedBy(String anchorId) {
+        int before = requireData().claims.size();
+        requireData().claims.entrySet().removeIf(entry -> anchorId.equals(entry.getValue().sourceAnchorId()));
+        int removed = before - requireData().claims.size();
+        if (removed > 0) requireData().setDirty();
+        return removed;
+    }
+
+    /** Removes only the materialized territory produced by a faction's anchors. */
+    public int removeProjectedClaims(UUID factionId) {
+        int before = requireData().claims.size();
+        requireData().claims.entrySet().removeIf(entry -> entry.getValue().projected()
+                && entry.getValue().factionId().equals(factionId));
+        int removed = before - requireData().claims.size();
+        if (removed > 0) requireData().setDirty();
+        return removed;
     }
 
     public TerritoryClaim removeClaim(TerritoryKey key) {

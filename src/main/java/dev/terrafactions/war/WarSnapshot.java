@@ -5,7 +5,14 @@ import java.util.UUID;
 
 public record WarSnapshot(UUID id, UUID attackerFactionId, UUID defenderFactionId, WarState state,
                           WarSideSnapshot attacker, WarSideSnapshot defender, long declaredAt,
-                          long preparationEndsAt, long startedAt, long endedAt) {
+                          long preparationEndsAt, long startedAt, long endedAt,
+                          long activeEndsAt, long lastPressureAt) {
+    public WarSnapshot(UUID id, UUID attackerFactionId, UUID defenderFactionId, WarState state,
+                       WarSideSnapshot attacker, WarSideSnapshot defender, long declaredAt,
+                       long preparationEndsAt, long startedAt, long endedAt) {
+        this(id, attackerFactionId, defenderFactionId, state, attacker, defender, declaredAt,
+                preparationEndsAt, startedAt, endedAt, 0L, 0L);
+    }
     public WarSnapshot {
         id = Objects.requireNonNull(id);
         attackerFactionId = Objects.requireNonNull(attackerFactionId);
@@ -30,16 +37,27 @@ public record WarSnapshot(UUID id, UUID attackerFactionId, UUID defenderFactionI
 
     public WarSnapshot withDefender(WarSideSnapshot value) {
         return new WarSnapshot(id, attackerFactionId, defenderFactionId, state, attacker, value,
-                declaredAt, preparationEndsAt, startedAt, endedAt);
+                declaredAt, preparationEndsAt, startedAt, endedAt, activeEndsAt, lastPressureAt);
     }
 
     public WarSnapshot withAttacker(WarSideSnapshot value) {
         return new WarSnapshot(id, attackerFactionId, defenderFactionId, state, value, defender,
-                declaredAt, preparationEndsAt, startedAt, endedAt);
+                declaredAt, preparationEndsAt, startedAt, endedAt, activeEndsAt, lastPressureAt);
     }
 
     public WarSnapshot withState(WarState value, long started, long ended) {
         return new WarSnapshot(id, attackerFactionId, defenderFactionId, value, attacker, defender,
-                declaredAt, preparationEndsAt, started, ended);
+                declaredAt, preparationEndsAt, started, ended, activeEndsAt,
+                value == WarState.ACTIVE ? started : lastPressureAt);
+    }
+
+    public WarSnapshot withSchedule(long activeEnd) {
+        return new WarSnapshot(id, attackerFactionId, defenderFactionId, state, attacker, defender,
+                declaredAt, preparationEndsAt, startedAt, endedAt, activeEnd, lastPressureAt);
+    }
+
+    public WarSnapshot withLastPressureAt(long value) {
+        return new WarSnapshot(id, attackerFactionId, defenderFactionId, state, attacker, defender,
+                declaredAt, preparationEndsAt, startedAt, endedAt, activeEndsAt, value);
     }
 }

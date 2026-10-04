@@ -7,7 +7,9 @@ public enum ProtectionAction {
     BLOCK_INTERACTIONS(true, false, "blockInteractions"),
     ENTITY_INTERACTIONS(true, false, "entityInteractions"),
     LIQUID_PLACEMENT(true, true, "liquidPlacement"),
-    EXPLOSIONS(true, true, "explosions");
+    EXPLOSIONS(true, true, "explosions"),
+    /** When enabled, prevents unauthorized players from damaging players in this territory. */
+    PVP(false, false, "pvp");
 
     private final boolean coreDefault;
     private final boolean borderDefault;
