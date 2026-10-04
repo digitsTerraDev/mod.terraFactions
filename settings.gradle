@@ -9,7 +9,7 @@ plugins {
 }
 
 sourceControl {
-    gitRepository(uri('https://github.com/DigitsCodeCompendium/minecraft_mod.terraLib.git')) {
-        producesModule('com.digitscodecompendium.terralib:minecraft_mod.terraLib')
+    gitRepository(uri('https://github.com/digitsTerraDev/mod.terraLib.git')) {
+        producesModule('com.digitscodecompendium.terralib:mod.terraLib')
     }
 }

@@ -140,9 +140,8 @@ dependencies {
     // Toroidal World is optional. The integration is isolated behind a mod-presence
     // check so normal TerraFactions installations do not need this dependency.
     compileOnly "maven.modrinth:toroidal-world:${project.toroidal_world_version}"
-    // The Git project currently has no explicit rootProject.name, so Gradle derives
-    // its module name from the repository directory.
-    implementation('com.digitscodecompendium.terralib:minecraft_mod.terraLib') {
+    // The source dependency uses TerraLib's Gradle project name.
+    implementation('com.digitscodecompendium.terralib:mod.terraLib') {
         version {
             branch = 'main'
         }
